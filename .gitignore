@@ -19,4 +19,10 @@ data/
 *.xlsx
 *.csv
 
-!tools/tool_checklist_pro/template_checklist.xlsx
+!tools/tool_checklist_pro/template_checklist.xlsx.streamlit/secrets.toml 
+.env 
+__pycache__/ 
+*.pyc 
+*.docx 
+*.pdf 
+.vietocr_onnx/ 
