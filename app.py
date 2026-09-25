@@ -17,11 +17,11 @@ os.environ["FLAGS_verbosity"] = "0"
 import streamlit as st
 from common.styles import apply_custom_styles
 from tools.tool_docx_converter.view import render_docx_converter_tool
-from tools.tool_automation.view import render_automation_tool
 from tools.tool_stamp_pdf.view import render as render_stamp_pdf_tool
 from tools.tool_checklist_pro.view import render_checklist_pro_tool
 from tools.tool_bom_checker.view import render_bom_checker_tool
 from tools.tool_pdf_to_word_ocr.view import render_pdf_to_word_tool
+from tools.tool_spec_auditor.view import render_spec_auditor_tool
 
 st.set_page_config(
     page_title="Personal Toolbox",
@@ -42,8 +42,8 @@ def main():
         "📑 Chuyển PDF/Scan sang Word (OCR)": render_pdf_to_word_tool,
         "📋 Checklist Pro (Đối soát tiêu chí)": render_checklist_pro_tool,
         "🔏 Đóng dấu giáp lai PDF": render_stamp_pdf_tool,
-        "⚡ Tác vụ & Tự động hóa": render_automation_tool,
-        "🔍 Kiểm tra nguồn hàng BOM (Nexar)": render_bom_checker_tool,
+        "🔬 Đối soát Chỉ tiêu Kỹ thuật & Datasheet": render_spec_auditor_tool,
+        "🔍 Kiểm tra nguồn hàng BOM": render_bom_checker_tool,
     }
     
     selected_tool = st.sidebar.radio(

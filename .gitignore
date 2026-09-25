@@ -1,28 +1,37 @@
-# Python
+# --- Python ---
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 *.so
 .Python
 env/
 venv/
 .venv/
+.env
 
-# Streamlit
+# --- Streamlit ---
 .streamlit/secrets.toml
 
-# OS & Logs
+# --- OS & Logs ---
 *.log
 .DS_Store
 Thumbs.db
-data/
-*.xlsx
-*.csv
 
-!tools/tool_checklist_pro/template_checklist.xlsx.streamlit/secrets.toml 
-.env 
-__pycache__/ 
-*.pyc 
-*.docx 
-*.pdf 
-.vietocr_onnx/ 
+# --- Data & Caches ---
+data/
+.vietocr_onnx/
+
+# --- Document & Sensitive Files ---
+# Bỏ qua tất cả các file tài liệu và bảng tính để tránh lộ dữ liệu dự án
+*.pdf
+*.docx
+*.csv
+*.xlsx
+*.xls
+
+# --- EXCEPTIONS (Ngoại lệ) ---
+# Chỉ cho phép đẩy các file template mẫu này lên GitHub
+!tools/tool_checklist_pro/template_checklist.xlsx
+!CTKT_Temp_2.xlsx
+!tools/tool_spec_auditor/CTKT_Temp_2.xlsx
