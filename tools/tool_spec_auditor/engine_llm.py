@@ -1,11 +1,11 @@
 import json
 import re
 import os
-from typing import List, Dict
+from typing import List
 from .models import SpecTargetItem, ItemAuditResult
 
 def audit_single_item_fallback(item: SpecTargetItem, pdf_name: str, pdf_text: str) -> ItemAuditResult:
-    """Chế độ fallback offline khi không có LLM API key."""
+    """Chế độ fallback offline khi không có LLM API key hoặc mất mạng."""
     if not pdf_text:
         return ItemAuditResult(
             tt=item.tt, row_idx=item.row_idx, name=item.name, part_number=item.part_number,
@@ -54,7 +54,7 @@ def audit_single_item_fallback(item: SpecTargetItem, pdf_name: str, pdf_text: st
             de_xuat_list.append(f"- {spec}")
         else:
             missing_specs.append(spec)
-            de_xuat_list.append(f"- {spec} (Lưu ý: Không tìm thấy trong datasheet, cần xác minh lại số liệu)")
+            de_xuat_list.append(f"- {spec} (Lưu ý: Không tìm thấy, cần xác minh lại)")
 
     is_all_pass = len(missing_specs) == 0
     nhan_xet = "Đạt" if is_all_pass else "Không đạt"
@@ -66,20 +66,6 @@ def audit_single_item_fallback(item: SpecTargetItem, pdf_name: str, pdf_text: st
         nhan_xet=nhan_xet, tham_chieu="\n".join(tham_chieu_list), ghi_chu=ghi_chu, de_xuat="\n".join(de_xuat_list),
         status="PASS" if is_all_pass else "FAIL"
     )
-
-def _get_dynamic_models(genai) -> List[str]:
-    """Tự động quét danh sách các model đang hoạt động từ tài khoản Google"""
-    available_models = []
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            available_models.append(m.name)
-            
-    # Ưu tiên các model Flash (nhanh) -> sau đó đến Pro -> Các model còn lại
-    flash_models = [m for m in available_models if 'flash' in m.lower()]
-    pro_models = [m for m in available_models if 'pro' in m.lower() and m not in flash_models]
-    others = [m for m in available_models if m not in flash_models and m not in pro_models]
-    
-    return flash_models + pro_models + others
 
 def audit_single_item_llm(item: SpecTargetItem, pdf_name: str, pdf_text: str, api_key: str = None) -> ItemAuditResult:
     if not api_key:
@@ -95,17 +81,12 @@ def audit_single_item_llm(item: SpecTargetItem, pdf_name: str, pdf_text: str, ap
         return audit_single_item_fallback(item, pdf_name, pdf_text)
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
+        # Nâng cấp lên thư viện mới nhất google.genai
+        from google import genai
+        from google.genai import types
         
-        # 1. Quét model động
-        try:
-            test_models = _get_dynamic_models(genai)
-            if not test_models:
-                raise Exception("API Key đúng nhưng không có quyền dùng model nào.")
-        except Exception as auth_e:
-            raise Exception(f"Lỗi API Key hoặc Mạng: {str(auth_e)}")
-
+        client = genai.Client(api_key=api_key)
+        
         text_truncated = pdf_text[:25000]
         prompt = f"""
 Bạn là chuyên gia thẩm định hồ sơ kỹ thuật và vật tư thiết bị.
@@ -146,34 +127,27 @@ TRẢ VỀ DUY NHẤT JSON NHƯ SAU (KHÔNG BỌC CODE BLOCK):
   "status": "PASS" hoặc "FAIL"
 }}
 """
-        last_error = None
-        for model_name in test_models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                raw_text = response.text.strip()
-                
-                if raw_text.startswith("```json"): raw_text = raw_text[7:]
-                if raw_text.startswith("```"): raw_text = raw_text[3:]
-                if raw_text.endswith("```"): raw_text = raw_text[:-3]
+        # Sử dụng API v2
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        
+        raw_text = response.text.strip()
+        if raw_text.startswith("```json"): raw_text = raw_text[7:]
+        if raw_text.startswith("```"): raw_text = raw_text[3:]
+        if raw_text.endswith("```"): raw_text = raw_text[:-3]
 
-                data = json.loads(raw_text.strip())
-                return ItemAuditResult(
-                    tt=item.tt, row_idx=item.row_idx, name=item.name, part_number=item.part_number, datasheet_file=pdf_name,
-                    thong_so_ky_thuat=data.get("thong_so_ky_thuat", "").strip(),
-                    nhan_xet=data.get("nhan_xet", "Không đạt").strip(),
-                    tham_chieu=data.get("tham_chieu", "").strip(),
-                    ghi_chu=data.get("ghi_chu", "").strip(),
-                    de_xuat=data.get("de_xuat", "").strip(),
-                    status=data.get("status", "FAIL").strip()
-                )
-            except Exception as e:
-                last_error = f"{model_name}: {str(e)}"
-                continue 
-                
-        res = audit_single_item_fallback(item, pdf_name, pdf_text)
-        res.ghi_chu += f" (Đã thử {len(test_models)} models nhưng đều báo lỗi: {last_error})"
-        return res
+        data = json.loads(raw_text.strip())
+        return ItemAuditResult(
+            tt=item.tt, row_idx=item.row_idx, name=item.name, part_number=item.part_number, datasheet_file=pdf_name,
+            thong_so_ky_thuat=data.get("thong_so_ky_thuat", "").strip(),
+            nhan_xet=data.get("nhan_xet", "Không đạt").strip(),
+            tham_chieu=data.get("tham_chieu", "").strip(),
+            ghi_chu=data.get("ghi_chu", "").strip(),
+            de_xuat=data.get("de_xuat", "").strip(),
+            status=data.get("status", "FAIL").strip()
+        )
 
     except Exception as e:
         res = audit_single_item_fallback(item, pdf_name, pdf_text)
@@ -199,17 +173,9 @@ def generate_specs_llm(item: SpecTargetItem, pdf_name: str, pdf_text: str, api_k
         )
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
+        from google import genai
+        client = genai.Client(api_key=api_key)
         
-        # 1. Quét model động
-        try:
-            test_models = _get_dynamic_models(genai)
-            if not test_models:
-                raise Exception("API Key đúng nhưng không có quyền dùng model nào.")
-        except Exception as auth_e:
-            raise Exception(f"Lỗi API Key hoặc Mạng: {str(auth_e)}")
-
         text_truncated = pdf_text[:25000]
         prompt = f"""
 Bạn là một Kỹ sư cao cấp chuyên lập hồ sơ yêu cầu kỹ thuật vật tư thiết bị.
@@ -226,8 +192,8 @@ NỘI DUNG DATASHEET ({pdf_name}):
 
 YÊU CẦU TRÍCH XUẤT (RẤT QUAN TRỌNG):
 1. TÌM ĐÚNG MÃ SẢN PHẨM: File PDF có thể là catalog chứa hàng chục dòng sản phẩm khác nhau. BẠN PHẢI TÌM VÀ TRÍCH XUẤT CHÍNH XÁC THÔNG SỐ CỦA MÃ '{item.part_number}'.
-2. CHỌN LỌC THÔNG SỐ CỐT LÕI: Chỉ trích xuất các thông số định lượng hoặc đặc tính kỹ thuật cốt lõi (Ví dụ: Kích thước, khối lượng, điện áp, dòng điện, công suất, dải nhiệt độ, IP/IK, chất liệu, tiêu chuẩn đáp ứng...). 
-3. LỌC NHIỄU: Tuyệt đối bỏ qua các câu văn quảng cáo, giới thiệu công ty, tính năng chung chung.
+2. CHỌN LỌC THÔNG SỐ CỐT LÕI: Chỉ trích xuất các thông số định lượng hoặc đặc tính kỹ thuật cốt lõi. 
+3. LỌC NHIỄU: Tuyệt đối bỏ qua các câu văn quảng cáo, giới thiệu công ty.
 4. ĐỊNH DẠNG CHUẨN: Trình bày thành một danh sách gạch đầu dòng chuyên nghiệp, ngắn gọn, mỗi dòng 1 thông số kèm đơn vị rõ ràng.
 
 TRẢ VỀ DUY NHẤT JSON NHƯ SAU (KHÔNG BỌC CODE BLOCK):
@@ -236,40 +202,30 @@ TRẢ VỀ DUY NHẤT JSON NHƯ SAU (KHÔNG BỌC CODE BLOCK):
   "ghi_chu": "Trống. (Chỉ ghi nếu mã sản phẩm không có trong datasheet, hoặc thiếu dữ liệu nghiêm trọng)"
 }}
 """
-        last_error = None
-        for model_name in test_models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                raw_text = response.text.strip()
-                
-                if raw_text.startswith("```json"): raw_text = raw_text[7:]
-                if raw_text.startswith("```"): raw_text = raw_text[3:]
-                if raw_text.endswith("```"): raw_text = raw_text[:-3]
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        
+        raw_text = response.text.strip()
+        if raw_text.startswith("```json"): raw_text = raw_text[7:]
+        if raw_text.startswith("```"): raw_text = raw_text[3:]
+        if raw_text.endswith("```"): raw_text = raw_text[:-3]
 
-                data = json.loads(raw_text.strip())
-                
-                return ItemAuditResult(
-                    tt=item.tt, 
-                    row_idx=item.row_idx, 
-                    name=item.name, 
-                    part_number=item.part_number, 
-                    datasheet_file=pdf_name,
-                    thong_so_ky_thuat="", 
-                    nhan_xet="Tạo cấu hình thành công", 
-                    tham_chieu="-", 
-                    ghi_chu=data.get("ghi_chu", "").strip(),
-                    de_xuat=data.get("de_xuat", "").strip(),
-                    status="PASS"
-                )
-            except Exception as e:
-                last_error = f"{model_name}: {str(e)}"
-                continue
-
+        data = json.loads(raw_text.strip())
+        
         return ItemAuditResult(
-            tt=item.tt, row_idx=item.row_idx, name=item.name, part_number=item.part_number,
-            datasheet_file=pdf_name, thong_so_ky_thuat="", nhan_xet="Lỗi AI",
-            tham_chieu="", ghi_chu=f"Đã thử toàn bộ {len(test_models)} model hợp lệ nhưng thất bại. Lỗi cuối: {last_error}", de_xuat="", status="FAIL"
+            tt=item.tt, 
+            row_idx=item.row_idx, 
+            name=item.name, 
+            part_number=item.part_number, 
+            datasheet_file=pdf_name,
+            thong_so_ky_thuat="", 
+            nhan_xet="Tạo cấu hình thành công", 
+            tham_chieu="-", 
+            ghi_chu=data.get("ghi_chu", "").strip(),
+            de_xuat=data.get("de_xuat", "").strip(),
+            status="PASS"
         )
 
     except Exception as e:

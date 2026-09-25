@@ -1,4 +1,4 @@
-# --- Web Framework & Core ---
+﻿# --- Web Framework & Core ---
 streamlit>=1.35.0
 pydantic>=2.0.0
 
@@ -11,6 +11,7 @@ plotly>=5.20.0
 
 # --- API & Network ---
 requests>=2.31.0
+ddgs>=0.4.1
 
 # --- AI & LLM ---
 google-genai>=1.0.0
