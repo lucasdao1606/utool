@@ -1,5 +1,6 @@
 import json
 import re
+import os
 from typing import List, Dict
 from .models import SpecTargetItem, ItemAuditResult
 
@@ -16,7 +17,6 @@ def audit_single_item_fallback(item: SpecTargetItem, pdf_name: str, pdf_text: st
     pdf_lower = pdf_text.lower()
     missing_specs = []
     
-    # 1. Kiem tra Nha san xuat & Ma NSX
     mfg_found = item.manufacturer.lower() in pdf_lower if item.manufacturer else True
     pn_found = item.part_number.lower() in pdf_lower if item.part_number else True
     
@@ -24,7 +24,6 @@ def audit_single_item_fallback(item: SpecTargetItem, pdf_name: str, pdf_text: st
     tham_chieu_list = []
     de_xuat_list = []
     
-    # Kiem tra Nha SX
     if item.manufacturer:
         if mfg_found:
             tham_chieu_list.append(f"- Nhà SX ({item.manufacturer}): Khớp ({pdf_name})")
@@ -33,7 +32,6 @@ def audit_single_item_fallback(item: SpecTargetItem, pdf_name: str, pdf_text: st
             missing_specs.append(f"Không tìm thấy Nhà sản xuất '{item.manufacturer}'")
             de_xuat_list.append(f"- Nhà sản xuất: Cập nhật theo datasheet thực tế")
             
-    # Kiem tra Ma NSX
     if item.part_number:
         if pn_found:
             tham_chieu_list.append(f"- Mã NSX ({item.part_number}): Khớp ({pdf_name})")
@@ -42,14 +40,11 @@ def audit_single_item_fallback(item: SpecTargetItem, pdf_name: str, pdf_text: st
             missing_specs.append(f"Không tìm thấy Mã NSX '{item.part_number}'")
             de_xuat_list.append(f"- Mã NSX: Cập nhật theo datasheet thực tế")
 
-    # 2. Kiem tra cac chi tieu ky thuat
     for spec in item.sub_specs:
         keywords = [k for k in re.split(r"[:,\s/]+", spec.lower()) if len(k) > 2]
-        
         found_page = None
         for page_num, page_text in re.findall(r"--- TRANG (\d+) ---\n(.*?)(?=\n--- TRANG|\Z)", pdf_text, re.DOTALL):
-            page_lower = page_text.lower()
-            if any(kw in page_lower for kw in keywords):
+            if any(kw in page_text.lower() for kw in keywords):
                 found_page = page_num
                 break
                 
@@ -66,20 +61,24 @@ def audit_single_item_fallback(item: SpecTargetItem, pdf_name: str, pdf_text: st
     ghi_chu = "" if is_all_pass else f"Thiếu/Không khớp: {'; '.join(missing_specs)}"
 
     return ItemAuditResult(
-        tt=item.tt,
-        row_idx=item.row_idx,
-        name=item.name,
-        part_number=item.part_number,
-        datasheet_file=pdf_name,
+        tt=item.tt, row_idx=item.row_idx, name=item.name, part_number=item.part_number, datasheet_file=pdf_name,
         thong_so_ky_thuat="\n".join(thong_so_list) if thong_so_list else "Chưa bóc tách được thông số",
-        nhan_xet=nhan_xet,
-        tham_chieu="\n".join(tham_chieu_list),
-        ghi_chu=ghi_chu,
-        de_xuat="\n".join(de_xuat_list),
+        nhan_xet=nhan_xet, tham_chieu="\n".join(tham_chieu_list), ghi_chu=ghi_chu, de_xuat="\n".join(de_xuat_list),
         status="PASS" if is_all_pass else "FAIL"
     )
 
 def audit_single_item_llm(item: SpecTargetItem, pdf_name: str, pdf_text: str, api_key: str = None) -> ItemAuditResult:
+    # 1. Cơ chế tự động dò tìm API Key nếu người dùng để trống ô nhập trên giao diện
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            try:
+                import streamlit as st
+                api_key = st.secrets.get("GEMINI_API_KEY")
+            except Exception:
+                pass
+
+    # 2. Nếu vẫn không có key hoặc không có nội dung, chạy chế độ Offline
     if not api_key or not pdf_text:
         return audit_single_item_fallback(item, pdf_name, pdf_text)
 
@@ -110,8 +109,8 @@ NỘI DUNG DATASHEET ({pdf_name}):
 QUY TẮC ĐỐI SOÁT & TRÍCH DẪN (RẤT QUAN TRỌNG):
 1. KIỂM TRA HÃNG & MÃ SẢN PHẨM: 
    - Nếu KHỚP: Tuyệt đối KHÔNG ghi vào ô "thong_so_ky_thuat". Chỉ ghi nhận vào ô "tham_chieu" (Ví dụ: "- Nhà SX ({item.manufacturer}): Khớp ({pdf_name})").
-   - Nếu KHÔNG KHỚP / KHÔNG THẤY: Ghi chi tiết lỗi vào ô "ghi_chu" (Ví dụ: "Không tìm thấy Mã NSX XYZ trong tài liệu").
-2. ĐỐI SOÁT CHỈ TIÊU KỸ THUẬT: Tìm giá trị thực tế tương ứng với từng chỉ tiêu. Ô "thong_so_ky_thuat" BÂY GIỜ CHỈ CHỨA CÁC CHỈ TIÊU KỸ THUẬT (không chứa Hãng hay Mã NSX).
+   - Nếu KHÔNG KHỚP / KHÔNG THẤY: Ghi chi tiết lỗi vào ô "ghi_chu".
+2. ĐỐI SOÁT CHỈ TIÊU KỸ THUẬT: Tìm giá trị thực tế tương ứng với từng chỉ tiêu. Ô "thong_so_ky_thuat" BÂY GIỜ CHỈ CHỨA CÁC CHỈ TIÊU KỸ THUẬT.
 3. TRÍCH DẪN CHI TIẾT THEO TRANG: Với MỖI nội dung tìm được, BẮT BUỘC chỉ rõ file nào, trang số mấy, mục nào. Ghi thẳng vào ô `tham_chieu`.
 4. ĐÁNH GIÁ CHUYÊN GIA:
    - "Đạt": Nếu TẤT CẢ Nhà sản xuất + Mã NSX + Thông số kỹ thuật đều KHỚP.
@@ -132,20 +131,13 @@ TRẢ VỀ DUY NHẤT JSON NHƯ SAU (KHÔNG BỌC CODE BLOCK):
 """
         response = model.generate_content(prompt)
         raw_text = response.text.strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]
-        if raw_text.startswith("```"):
-            raw_text = raw_text[3:]
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
+        if raw_text.startswith("```json"): raw_text = raw_text[7:]
+        if raw_text.startswith("```"): raw_text = raw_text[3:]
+        if raw_text.endswith("```"): raw_text = raw_text[:-3]
 
         data = json.loads(raw_text.strip())
         return ItemAuditResult(
-            tt=item.tt,
-            row_idx=item.row_idx,
-            name=item.name,
-            part_number=item.part_number,
-            datasheet_file=pdf_name,
+            tt=item.tt, row_idx=item.row_idx, name=item.name, part_number=item.part_number, datasheet_file=pdf_name,
             thong_so_ky_thuat=data.get("thong_so_ky_thuat", "").strip(),
             nhan_xet=data.get("nhan_xet", "Không đạt").strip(),
             tham_chieu=data.get("tham_chieu", "").strip(),
