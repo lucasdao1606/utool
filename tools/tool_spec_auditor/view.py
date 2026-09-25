@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import os
+import time
 from datetime import datetime
 
 from .parser_excel import parse_template_excel, save_audit_results_to_workbook
@@ -25,7 +26,7 @@ def find_datasheet_name_for_tt(tt: int, folder_path: str):
 
 def render_spec_auditor_tool():
     st.subheader("🔬 Đối soát Bảng Chỉ tiêu Kỹ thuật & Datasheet PDF")
-    st.caption("Tối ưu hóa VPS cấu hình thấp: Ghi trực tiếp ổ đĩa. Tải file an toàn, đếm thời gian thực.")
+    st.caption("Tối ưu hóa VPS 1GB RAM: Trực tiếp ghi ổ đĩa phân mảnh (Chunking) & Giảm tải CPU.")
 
     with st.expander("⚙️ Cấu hình API & Tùy chọn", expanded=False):
         gemini_api_key = st.text_input(
@@ -60,10 +61,10 @@ def render_spec_auditor_tool():
     with col2:
         st.markdown("#### 2. Nạp Datasheet (PDF)")
         
-        tab1, tab2 = st.tabs(["📤 Tải mẻ liên tục (An toàn)", "📂 Quét thư mục VPS"])
+        tab1, tab2 = st.tabs(["📤 Tải mẻ liên tục (An toàn RAM)", "📂 Quét thư mục VPS"])
         
         with tab1:
-            st.info("💡 **Mẹo an toàn:** Kéo thả từng mẻ 10-20 file. Vừa tải xong, hệ thống sẽ chốt lưu ngay vào ổ cứng, cập nhật số lượng và tự làm sạch hộp để bạn nạp mẻ tiếp theo.")
+            st.info("💡 **Mẹo an toàn cho VPS:** Kéo thả từng mẻ 10-30 file (Tối đa 200MB/mẻ). Hệ thống ghi theo phân mảnh (Chunking) 64KB để không làm đầy RAM.")
             
             # Sử dụng Dynamic Key để uploader luôn được làm mới sau khi nạp xong
             pdf_files = st.file_uploader(
@@ -73,23 +74,28 @@ def render_spec_auditor_tool():
                 key=f"audit_datasheet_uploader_{st.session_state.uploader_key}"
             )
             
-            # Xử lý lưu ngay lập tức và reset UI
+            # Xử lý lưu phân mảnh (Chunking) và reset UI
             if pdf_files:
                 new_count = 0
                 for f in pdf_files:
                     file_path = os.path.join(DATASHEET_DIR, f.name)
                     if not os.path.exists(file_path):
+                        # Ghi file theo từng khối nhỏ 64KB thay vì đọc cả cục bằng getvalue()
                         with open(file_path, "wb") as out_file:
-                            out_file.write(f.getvalue())
+                            while True:
+                                chunk = f.read(65536)
+                                if not chunk:
+                                    break
+                                out_file.write(chunk)
                         new_count += 1
                 
                 if new_count > 0:
-                    # Tăng key để hộp upload tự xóa rỗng, và tải lại giao diện để nhảy số Live Counter
+                    # Tăng key để hộp upload tự xóa rỗng, nhảy số Live Counter
                     st.session_state.uploader_key += 1
                     st.rerun()
 
         with tab2:
-            st.caption("Dùng phần mềm như WinSCP/FileZilla copy hàng loạt file vào thư mục sau để nhanh nhất:")
+            st.caption("Dùng phần mềm như WinSCP/FileZilla copy hàng loạt file vào thư mục sau để nhanh nhất (Không tốn RAM):")
             st.code(DATASHEET_DIR, language="bash")
 
         # Đếm file thực tế đang tồn tại trên ổ cứng (LIVE COUNTER)
@@ -101,7 +107,10 @@ def render_spec_auditor_tool():
             st.success(f"📦 **Kho dữ liệu (Ổ đĩa):** Đang có sẵn **{total_pdfs}** file Datasheet an toàn.")
             if st.button("🗑️ Xóa toàn bộ file trong ổ đĩa", use_container_width=True):
                 for fname in current_files:
-                    os.remove(os.path.join(DATASHEET_DIR, fname))
+                    try:
+                        os.remove(os.path.join(DATASHEET_DIR, fname))
+                    except:
+                        pass
                 st.rerun()
         else:
             st.warning("📦 **Kho dữ liệu (Ổ đĩa):** Đang trống (0 file).")
@@ -159,7 +168,6 @@ def render_spec_auditor_tool():
     with st.expander(f"👁️ Xem trước danh sách kiểm tra ({len(items_to_process)} hạng mục)", expanded=False):
         st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
 
-    # Bất cứ lúc nào cũng có thể bấm nút này, nó sẽ quét ổ cứng để chạy
     if st.button("🚀 Bắt Đầu Quy Trình Rà Soát Kỹ Thuật", type="primary", use_container_width=True):
         if not items_to_process:
             st.warning("Không có hạng mục nào thỏa mãn điều kiện để đối soát.")
@@ -213,6 +221,7 @@ def render_spec_auditor_tool():
                 log_msg(f"❌ Lỗi đọc file: {str(e)}")
                 pdf_full_text = ""
                 
+            # Xóa biến bytes để giải phóng RAM lập tức
             del pdf_bytes 
 
             res = audit_single_item_llm(
@@ -226,6 +235,9 @@ def render_spec_auditor_tool():
                 log_msg(f"🔴 KẾT QUẢ: **{res.nhan_xet.upper()}**")
 
             audit_results.append(res)
+            
+            # Thêm nhịp nghỉ 1.5 giây để hạ nhiệt CPU (Tránh treo VPS 1GB RAM)
+            time.sleep(1.5)
 
         status_box.success("🎉 Hoàn thành chu trình rà soát! Hệ thống đã tự động dọn dẹp ổ đĩa.")
         updated_excel_bytes = save_audit_results_to_workbook(wb, audit_results)
