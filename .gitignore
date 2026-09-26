@@ -10,8 +10,10 @@ venv/
 .venv/
 .env
 
-# --- Streamlit ---
+# --- Cấu hình, API Keys & Secrets ---
 .streamlit/secrets.toml
+credentials.json
+token.json
 
 # --- OS & Logs ---
 *.log
