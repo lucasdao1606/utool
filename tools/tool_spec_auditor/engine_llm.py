@@ -1,8 +1,65 @@
 import json
 import re
 import os
+import time
 from typing import List
 from .models import SpecTargetItem, ItemAuditResult
+
+# Đã cập nhật danh sách các model thế hệ 3.x mới nhất dựa trên kết quả quét API thực tế của bạn
+_AVAILABLE_MODELS = [
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.5-flash',
+    'gemini-3-flash-preview'
+]
+
+def _generate_with_fallback(client, prompt: str):
+    """
+    Hàm gọi API thông minh: 
+    - Thử model ưu tiên từ mới đến cũ.
+    - Lưu lại toàn bộ lịch sử lỗi để báo cáo chính xác nếu tất cả đều sập.
+    """
+    errors_log = []
+    max_retries = 2
+
+    for model_name in _AVAILABLE_MODELS:
+        retries = 0
+        while retries <= max_retries:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                if response and response.text:
+                    return response
+                else:
+                    raise ValueError("Phản hồi bị rỗng hoặc bị Google chặn (Safety Block).")
+                    
+            except Exception as e:
+                error_msg = str(e).lower()
+                
+                # Bắt lỗi 429 Quá tải API / Quota Exhausted
+                if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
+                    if retries < max_retries:
+                        wait_time = 10 * (2 ** retries) 
+                        print(f"⚠️ [API Rate Limit] {model_name} đang quá tải. Chờ {wait_time}s...")
+                        time.sleep(wait_time)
+                        retries += 1
+                        continue 
+                    else:
+                        errors_log.append(f"{model_name} (Hết lượt truy cập 429)")
+                        break 
+                
+                elif "404" in error_msg or "not found" in error_msg:
+                    errors_log.append(f"{model_name} (Bị khóa/404)")
+                    break 
+                else:
+                    # Bắt các lỗi ẩn (như sai API Key, file nội dung quá dài, v.v.)
+                    errors_log.append(f"{model_name} ({str(e)})")
+                    break 
+                
+    # Nếu chạy hết danh sách mà vẫn lỗi, gom tất cả lý do lại ném ra ngoài màn hình
+    raise Exception(f"Thất bại toàn bộ. Chi tiết lỗi: {', '.join(errors_log)}")
 
 def audit_single_item_fallback(item: SpecTargetItem, pdf_name: str, pdf_text: str) -> ItemAuditResult:
     """Chế độ fallback offline khi không có LLM API key hoặc mất mạng."""
@@ -81,10 +138,7 @@ def audit_single_item_llm(item: SpecTargetItem, pdf_name: str, pdf_text: str, ap
         return audit_single_item_fallback(item, pdf_name, pdf_text)
 
     try:
-        # Nâng cấp lên thư viện mới nhất google.genai
         from google import genai
-        from google.genai import types
-        
         client = genai.Client(api_key=api_key)
         
         text_truncated = pdf_text[:25000]
@@ -127,11 +181,7 @@ TRẢ VỀ DUY NHẤT JSON NHƯ SAU (KHÔNG BỌC CODE BLOCK):
   "status": "PASS" hoặc "FAIL"
 }}
 """
-        # Sử dụng API v2
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-        )
+        response = _generate_with_fallback(client, prompt)
         
         raw_text = response.text.strip()
         if raw_text.startswith("```json"): raw_text = raw_text[7:]
@@ -202,10 +252,7 @@ TRẢ VỀ DUY NHẤT JSON NHƯ SAU (KHÔNG BỌC CODE BLOCK):
   "ghi_chu": "Trống. (Chỉ ghi nếu mã sản phẩm không có trong datasheet, hoặc thiếu dữ liệu nghiêm trọng)"
 }}
 """
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-        )
+        response = _generate_with_fallback(client, prompt)
         
         raw_text = response.text.strip()
         if raw_text.startswith("```json"): raw_text = raw_text[7:]
@@ -232,5 +279,5 @@ TRẢ VỀ DUY NHẤT JSON NHƯ SAU (KHÔNG BỌC CODE BLOCK):
         return ItemAuditResult(
             tt=item.tt, row_idx=item.row_idx, name=item.name, part_number=item.part_number,
             datasheet_file=pdf_name, thong_so_ky_thuat="", nhan_xet="Lỗi cấu hình AI",
-            tham_chieu="", ghi_chu=f"Lỗi khởi tạo hệ thống LLM: {str(e)}", de_xuat="", status="FAIL"
+            tham_chieu="", ghi_chu=f"Lỗi hệ thống AI: {str(e)}", de_xuat="", status="FAIL"
         )

@@ -3,6 +3,8 @@ headless = true
 enableCORS = false
 enableXsrfProtection = true
 maxUploadSize = 100
+# Giới hạn số lượng kết nối xử lý đồng thời (ví dụ: 10)
+maxThreads = 3
 
 [theme]
 base = "dark"

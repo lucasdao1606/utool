@@ -28,3 +28,10 @@ opencv-python-headless>=4.9.0.80
 
 # --- Dependency Conflict Resolution ---
 protobuf==3.20.2
+
+# --- Security & Google Drive API ---
+google-api-python-client>=2.0.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+cryptography>=42.0.0
+bcrypt>=4.1.0

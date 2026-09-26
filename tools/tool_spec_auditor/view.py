@@ -5,18 +5,36 @@ import os
 import time
 import zipfile
 import io
-import gc  # Thư viện thu gom rác giải phóng RAM
+import gc
 from datetime import datetime
 
+# Import db để giữ kết nối không bị timeout
+from core.db import keep_alive_session
+
+# Đường dẫn import tương đối '.'
 from .parser_excel import parse_template_excel, save_audit_results_to_workbook
 from .parser_pdf import extract_pdf_pages
 from .engine_llm import audit_single_item_llm, generate_specs_llm
 from .models import ItemAuditResult
 from .api_datasheet import auto_fetch_datasheet
 
-# Lấy đường dẫn tuyệt đối để người dùng dễ tìm thấy trên ổ cứng
 DATASHEET_DIR = os.path.abspath(os.path.join(os.getcwd(), "datasheets"))
 os.makedirs(DATASHEET_DIR, exist_ok=True)
+
+# Các đường dẫn đến file template nằm sẵn trong dự án
+TEMPLATE_FILES = {
+    1: "tools/tool_spec_auditor/templates/CTKT_Temp_2.xlsx",
+    2: "tools/tool_spec_auditor/templates/CTKT_Temp_3.xlsx", 
+    3: "tools/tool_spec_auditor/templates/CTKT_Temp_4.xlsx"
+}
+
+def get_template_bytes(mode: int) -> bytes:
+    """Đọc file template từ ổ cứng trả về bytes, nếu không có trả về None."""
+    filepath = TEMPLATE_FILES.get(mode)
+    if filepath and os.path.exists(filepath):
+        with open(filepath, "rb") as f:
+            return f.read()
+    return None
 
 def find_datasheet_name_for_tt(tt: int, folder_path: str):
     pattern = rf"^{tt}(?![0-9])"
@@ -39,9 +57,6 @@ def create_zip_of_datasheets(folder_path: str) -> bytes:
 def render_spec_auditor_tool():
     st.subheader("🔬 Trợ lý Kỹ thuật: Đánh giá & Xây dựng Chỉ tiêu (AI)")
     
-    # ---------------------------------------------------------------------
-    # CƠ CHẾ DỪNG KHẨN CẤP (STOP FLAG)
-    # ---------------------------------------------------------------------
     if "stop_process" not in st.session_state:
         st.session_state.stop_process = False
 
@@ -82,14 +97,29 @@ def render_spec_auditor_tool():
     col1, col2 = st.columns([1, 1])
     with col1:
         st.markdown("#### 1. File Template (Excel)")
-        template_filename = "CTKT_Temp_2.xlsx" if mode_idx == 1 else ("CTKT_Temp_3.xlsx" if mode_idx == 2 else "CTKT_Temp_4.xlsx")
         
-        excel_file = st.file_uploader(f"Tải lên file {template_filename}:", type=["xlsx"], key=f"uploader_{mode_idx}")
+        # Nút tải Template tương ứng với mode hiện tại
+        template_bytes = get_template_bytes(mode_idx)
+        template_filename = f"CTKT_Temp_{mode_idx + 1}.xlsx" 
+        
+        if template_bytes:
+            st.download_button(
+                label=f"📥 Tải {template_filename} Mẫu (Template)",
+                data=template_bytes,
+                file_name=template_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="secondary",
+                use_container_width=True
+            )
+        else:
+            st.error(f"⚠️ Không tìm thấy file mẫu trên máy chủ: {template_filename}")
+
+        excel_file = st.file_uploader(f"Tải lên file {template_filename} đã điền số liệu:", type=["xlsx"], key=f"uploader_{mode_idx}")
 
     with col2:
         st.markdown("#### 2. Thư mục lưu Datasheet")
         st.info("📂 **Đường dẫn thực tế trên ổ cứng của bạn đang nằm ở đây:**")
-        st.code(DATASHEET_DIR, language="bash") # Hiển thị đường dẫn rõ ràng để bạn copy dán vào Explorer
+        st.code(DATASHEET_DIR, language="bash")
 
         current_files = [f for f in os.listdir(DATASHEET_DIR) if f.lower().endswith('.pdf')]
         total_pdfs = len(current_files)
@@ -127,8 +157,17 @@ def render_spec_auditor_tool():
         items_to_process = target_items
 
     # =====================================================================
-    # NÚT BẤM BẮT ĐẦU VÀ DỪNG KHẨN CẤP
+    # NÚT HỎI DỌN DẸP DÀNH RIÊNG CHO MODE 3
     # =====================================================================
+    clear_old_datasheets = False
+    if mode_idx == 3:
+        st.markdown("##### ⚙️ Tùy chọn dọn dẹp (Mode 3)")
+        clear_old_datasheets = st.checkbox(
+            "🗑️ Xóa sạch toàn bộ file Datasheet cũ trước khi bắt đầu quét API", 
+            value=True, # Mặc định tick sẵn
+            help="Nên chọn để tránh hệ thống lấy nhầm file PDF tồn dư từ các lần chạy trước."
+        )
+
     col_start, col_stop = st.columns(2)
     start_btn = col_start.button("🚀 BẮT ĐẦU TIẾN TRÌNH", type="primary", use_container_width=True)
     stop_btn = col_stop.button("🛑 DỪNG KHẨN CẤP & XUẤT FILE", type="secondary", use_container_width=True)
@@ -157,16 +196,36 @@ def render_spec_auditor_tool():
         audit_results = []
         total_steps = len(items_to_process)
         
-        # Biến đếm thời gian thực
         count_downloaded = 0
         count_processed = 0
 
         def log_msg(msg: str):
             ts = datetime.now().strftime("%H:%M:%S")
             log_container.markdown(f"`[{ts}]` {msg}")
+            # Duy trì session mỗi khi có log mới
+            if "utool_session_id" in st.session_state:
+                try:
+                    keep_alive_session(st.session_state.utool_session_id)
+                except Exception:
+                    pass
+
+        # --- THỰC THI LỆNH XÓA NẾU NGƯỜI DÙNG ĐỒNG Ý ---
+        if mode_idx == 3 and clear_old_datasheets:
+            log_msg("🧹 Đang dọn dẹp dữ liệu cũ...")
+            deleted_count = 0
+            for fname in os.listdir(DATASHEET_DIR):
+                if fname.lower().endswith('.pdf'):
+                    try: 
+                        os.remove(os.path.join(DATASHEET_DIR, fname))
+                        deleted_count += 1
+                    except: pass
+            if deleted_count > 0:
+                log_msg(f"✅ Đã dọn sạch {deleted_count} file PDF tồn dư. Bắt đầu phiên làm việc mới!")
+            else:
+                log_msg("✅ Thư mục hiện tại đã trống, sẵn sàng tải file mới.")
 
         for idx, item in enumerate(items_to_process):
-            # KIỂM TRA LỆNH DỪNG
+                
             if st.session_state.stop_process:
                 log_msg("🛑 ĐÃ NHẬN LỆNH DỪNG KHẨN CẤP TỪ NGƯỜI DÙNG!")
                 break
@@ -176,10 +235,10 @@ def render_spec_auditor_tool():
             status_box.markdown(f"**Đang xử lý [{step_num}/{total_steps}]:** TT {item.tt} - {item.name}")
             
             ph_total.metric("Tổng số mục", f"{step_num}/{total_steps}")
+            log_msg(f"Bắt đầu xử lý: {item.name}")
 
             pdf_name = find_datasheet_name_for_tt(item.tt, DATASHEET_DIR)
 
-            # --- MODE 3: GỌI API LẤY FILE ---
             if not pdf_name and mode_idx == 3:
                 log_msg(f"🌐 Đang quét API cho: '{item.part_number}'...")
                 downloaded_name = auto_fetch_datasheet(
@@ -204,10 +263,8 @@ def render_spec_auditor_tool():
                 audit_results.append(res)
                 continue
 
-            # --- TRÍCH XUẤT VÀ PHÂN TÍCH AI ---
             pdf_path = os.path.join(DATASHEET_DIR, pdf_name)
             
-            # Sử dụng with đảm bảo file được đóng ngay sau khi đọc
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
 
@@ -217,18 +274,15 @@ def render_spec_auditor_tool():
             except Exception as e:
                 pdf_full_text = ""
                 
-            # XÓA BIẾN VÀ BUỘC HỆ THỐNG DỌN DẸP RAM NGAY LẬP TỨC
             del pdf_bytes 
             del pages
             gc.collect()
 
-            # LLM Engine
             if is_mode_audit:
                 res = audit_single_item_llm(item=item, pdf_name=pdf_name, pdf_text=pdf_full_text, api_key=gemini_api_key.strip())
             else:
                 res = generate_specs_llm(item=item, pdf_name=pdf_name, pdf_text=pdf_full_text, api_key=gemini_api_key.strip())
 
-            # XÓA TIẾP TEXT PDF TRONG RAM
             del pdf_full_text
             gc.collect()
 
@@ -237,7 +291,6 @@ def render_spec_auditor_tool():
             count_processed += 1
             ph_processed.metric("Đã phân tích AI", count_processed)
 
-            # LƯU LŨY TIẾN (PROGRESSIVE SAVE): Đảm bảo dữ liệu không bao giờ mất
             st.session_state["audited_results_list"] = audit_results
             st.session_state["audited_excel_bytes"] = save_audit_results_to_workbook(wb, audit_results, is_mode_audit)
             st.session_state["last_mode_was_audit"] = is_mode_audit
@@ -250,9 +303,6 @@ def render_spec_auditor_tool():
         else:
             status_box.success("🎉 Hoàn thành 100% tiến trình! Bạn có thể tải kết quả.")
 
-    # =====================================================================
-    # HIỂN THỊ KẾT QUẢ ĐÃ XỬ LÝ & TẢI FILE
-    # =====================================================================
     if "audited_results_list" in st.session_state:
         results = st.session_state["audited_results_list"]
         st.markdown("### 📊 Tổng Hợp Kết Quả")

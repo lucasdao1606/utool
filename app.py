@@ -22,6 +22,10 @@ from tools.tool_checklist_pro.view import render_checklist_pro_tool
 from tools.tool_bom_checker.view import render_bom_checker_tool
 from tools.tool_pdf_to_word_ocr.view import render_pdf_to_word_tool
 from tools.tool_spec_auditor.view import render_spec_auditor_tool
+from tools.tool_gdrive_secure.view import render_gdrive_secure_tool
+
+from core.db import init_db, get_active_users_count, MAX_CONCURRENT_USERS
+from core.auth import global_auth_guard
 
 st.set_page_config(
     page_title="Personal Toolbox",
@@ -30,13 +34,22 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ĐẶT EMAIL ADMIN CỦA BẠN TẠI ĐÂY
+ADMIN_EMAIL = "phantichcrypto@gmail.com"
+
 def main():
     apply_custom_styles()
+    
+    init_db()
+    global_auth_guard()
+    
+    # Lấy email của người dùng đang đăng nhập hiện tại
+    current_user_email = st.session_state.get("utool_user_email", "")
     
     st.sidebar.title("🎛️ Personal Toolbox")
     st.sidebar.caption("Workspace Platform")
     
-    # Danh mục công cụ
+    # 1. Danh sách công cụ cơ bản (Ai cũng thấy)
     tools_registry = {
         "📄 Chuyển đổi DOCX sang Excel": render_docx_converter_tool,
         "📑 Chuyển PDF/Scan sang Word (OCR)": render_pdf_to_word_tool,
@@ -46,6 +59,10 @@ def main():
         "🔍 Kiểm tra nguồn hàng BOM": render_bom_checker_tool,
     }
     
+    # 2. Phân quyền: Nếu đúng là Admin thì mới nhét thêm tool G-Drive vào menu
+    if current_user_email == ADMIN_EMAIL:
+        tools_registry["☁️ G-Drive Secure Box (Admin)"] = render_gdrive_secure_tool
+    
     selected_tool = st.sidebar.radio(
         "Lựa chọn công cụ:",
         options=list(tools_registry.keys()),
@@ -53,9 +70,8 @@ def main():
     )
     
     st.sidebar.divider()
-    st.sidebar.markdown("**Trạng thái hệ thống:** 🟢 Sẵn sàng")
+    st.sidebar.markdown(f"**Tải trọng VPS:** ` {get_active_users_count()}/{MAX_CONCURRENT_USERS} ` 🟢")
     
-    # Hiển thị tool được chọn
     tools_registry[selected_tool]()
 
 if __name__ == "__main__":

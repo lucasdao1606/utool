@@ -18,9 +18,11 @@ venv/
 .DS_Store
 Thumbs.db
 
-# --- Data & Caches ---
+# --- Data, Caches & Databases ---
 data/
 .vietocr_onnx/
+core/utool_global.db
+datasheets/
 
 # --- Document & Sensitive Files ---
 # Bỏ qua tất cả các file tài liệu và bảng tính để tránh lộ dữ liệu dự án
@@ -29,9 +31,11 @@ data/
 *.csv
 *.xlsx
 *.xls
+*.zip
 
 # --- EXCEPTIONS (Ngoại lệ) ---
 # Chỉ cho phép đẩy các file template mẫu này lên GitHub
 !tools/tool_checklist_pro/template_checklist.xlsx
-!CTKT_Temp_2.xlsx
-!tools/tool_spec_auditor/CTKT_Temp_2.xlsx
+!tools/tool_spec_auditor/templates/CTKT_Temp_2.xlsx
+!tools/tool_spec_auditor/templates/CTKT_Temp_3.xlsx
+!tools/tool_spec_auditor/templates/CTKT_Temp_4.xlsx
