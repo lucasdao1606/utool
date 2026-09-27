@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import zipfile
+import mimetypes
 from datetime import datetime
 from tools.tool_gdrive_secure.src.api.drive_service import list_encrypted_files, download_from_drive, delete_from_drive
 from tools.tool_gdrive_secure.src.utils.crypto_utils import decrypt_data
@@ -44,7 +45,7 @@ def render_download_section():
         data.append({
             "Chọn": False,
             "ID": f.get("id"),
-            "Tên File": f.get("name", "").replace(".enc", ""), # Ẩn đuôi .enc cho đẹp
+            "Tên File": f.get("name", "").replace(".enc", ""), # Ẩn đuôi .enc để trả về tên file gốc
             "Kích thước": format_size(f.get("size", 0)),
             "Ngày tạo": format_date(f.get("createdTime", ""))
         })
@@ -95,7 +96,10 @@ def render_download_section():
                             
                             st.session_state.download_data = dec_bytes
                             st.session_state.download_filename = selected_names[0]
-                            st.session_state.download_mime = "application/octet-stream"
+                            
+                            # Tự động nhận diện mimetype gốc sau giải mã
+                            file_mimetype, _ = mimetypes.guess_type(selected_names[0])
+                            st.session_state.download_mime = file_mimetype if file_mimetype else "application/octet-stream"
                         else:
                             # Nếu chọn nhiều file -> Đóng gói thành file ZIP
                             zip_buffer = io.BytesIO()
