@@ -25,38 +25,42 @@ def global_auth_guard():
         # ==========================================
         if st.session_state.auth_mode == "login":
             st.subheader("Đăng nhập")
-            email = st.text_input("Tài khoản / Email").strip()
-            password = st.text_input("Mật khẩu", type="password")
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Đăng nhập", type="primary", use_container_width=True):
+            with st.form("login_form"):
+                email = st.text_input("Tài khoản / Email").strip()
+                password = st.text_input("Mật khẩu", type="password")
+                
+                submitted_login = st.form_submit_button("Đăng nhập", type="primary", use_container_width=True)
+                
+                if submitted_login:
                     if verify_user(email, password):
                         st.session_state.utool_user_email = email
                         st.rerun()
                     else:
                         st.error("❌ Sai tài khoản hoặc mật khẩu!")
-            with c2:
+                        
+            c1, c2 = st.columns(2)
+            with c1:
                 if st.button("Đăng ký tài khoản", use_container_width=True):
                     st.session_state.auth_mode = "register"
                     st.rerun()
-                    
-            if st.button("Quên mật khẩu?", use_container_width=True):
-                st.session_state.auth_mode = "forgot"
-                st.rerun()
+            with c2:
+                if st.button("Quên mật khẩu?", use_container_width=True):
+                    st.session_state.auth_mode = "forgot"
+                    st.rerun()
 
         # ==========================================
         # 2. MÀN HÌNH ĐĂNG KÝ (Xác nhận MK 2 lần)
         # ==========================================
         elif st.session_state.auth_mode == "register":
             st.subheader("Đăng ký tài khoản mới")
-            reg_email = st.text_input("Email đăng ký").strip()
-            reg_pw = st.text_input("Mật khẩu", type="password")
-            reg_pw_confirm = st.text_input("Xác nhận lại mật khẩu", type="password")
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Đăng ký", type="primary", use_container_width=True):
+            with st.form("register_form"):
+                reg_email = st.text_input("Email đăng ký").strip()
+                reg_pw = st.text_input("Mật khẩu", type="password")
+                reg_pw_confirm = st.text_input("Xác nhận lại mật khẩu", type="password")
+                
+                submitted_register = st.form_submit_button("Đăng ký", type="primary", use_container_width=True)
+                
+                if submitted_register:
                     if not reg_email or not reg_pw:
                         st.error("⚠️ Vui lòng điền đầy đủ thông tin!")
                     elif len(reg_pw) < 6:
@@ -70,21 +74,22 @@ def global_auth_guard():
                             st.rerun()
                         else:
                             st.error("⚠️ Email này đã tồn tại trong hệ thống!")
-            with c2:
-                if st.button("Quay lại Đăng nhập", use_container_width=True):
-                    st.session_state.auth_mode = "login"
-                    st.rerun()
+                            
+            if st.button("Quay lại Đăng nhập", use_container_width=True):
+                st.session_state.auth_mode = "login"
+                st.rerun()
 
         # ==========================================
         # 3. MÀN HÌNH QUÊN MẬT KHẨU (Gửi OTP)
         # ==========================================
         elif st.session_state.auth_mode == "forgot":
             st.subheader("Khôi phục mật khẩu")
-            reset_email = st.text_input("Nhập email tài khoản của bạn:").strip()
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Gửi mã OTP", type="primary", use_container_width=True):
+            with st.form("forgot_form"):
+                reset_email = st.text_input("Nhập email tài khoản của bạn:").strip()
+                
+                submitted_forgot = st.form_submit_button("Gửi mã OTP", type="primary", use_container_width=True)
+                
+                if submitted_forgot:
                     if not reset_email:
                         st.error("⚠️ Vui lòng nhập email!")
                     else:
@@ -98,10 +103,10 @@ def global_auth_guard():
                                 st.error("❌ Lỗi gửi email. Kiểm tra lại cấu hình SMTP.")
                         else:
                             st.error("⚠️ Email không tồn tại trong hệ thống!")
-            with c2:
-                if st.button("Quay lại", use_container_width=True):
-                    st.session_state.auth_mode = "login"
-                    st.rerun()
+                            
+            if st.button("Quay lại", use_container_width=True):
+                st.session_state.auth_mode = "login"
+                st.rerun()
                     
         # ==========================================
         # 4. MÀN HÌNH ĐẶT LẠI MẬT KHẨU (Nhập OTP)
@@ -111,13 +116,14 @@ def global_auth_guard():
             target_email = st.session_state.get("reset_email_target", "")
             st.success(f"📧 Mã OTP đã được gửi đến: **{target_email}**")
             
-            otp_code = st.text_input("Mã OTP (6 số từ email):")
-            new_pw = st.text_input("Mật khẩu mới:", type="password")
-            new_pw_confirm = st.text_input("Xác nhận mật khẩu mới:", type="password")
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Đổi mật khẩu", type="primary", use_container_width=True):
+            with st.form("reset_form"):
+                otp_code = st.text_input("Mã OTP (6 số từ email):")
+                new_pw = st.text_input("Mật khẩu mới:", type="password")
+                new_pw_confirm = st.text_input("Xác nhận mật khẩu mới:", type="password")
+                
+                submitted_reset = st.form_submit_button("Đổi mật khẩu", type="primary", use_container_width=True)
+                
+                if submitted_reset:
                     if new_pw != new_pw_confirm:
                         st.error("❌ Mật khẩu xác nhận không khớp!")
                     elif len(new_pw) < 6:
@@ -130,10 +136,10 @@ def global_auth_guard():
                         st.rerun()
                     else:
                         st.error("❌ Mã OTP không hợp lệ hoặc đã hết hạn!")
-            with c2:
-                if st.button("Hủy bỏ", use_container_width=True):
-                    st.session_state.auth_mode = "login"
-                    st.rerun()
+                        
+            if st.button("Hủy bỏ", use_container_width=True):
+                st.session_state.auth_mode = "login"
+                st.rerun()
 
     # Dừng luồng Streamlit tại đây, chặn không cho render nội dung bên dưới (app.py)
     st.stop()

@@ -47,21 +47,20 @@ def render_2fa_verify_screen(email, existing_secret):
     st.subheader("🔒 Xác thực bảo mật 2 lớp (2FA)")
     st.info("Tài khoản của bạn đang được bảo vệ bởi 2FA. Vui lòng nhập mã OTP để vào hệ thống.")
     
-    otp_input = st.text_input("Nhập mã 6 số từ ứng dụng Authy/Google Authenticator:")
-    
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("Xác thực", type="primary", use_container_width=True):
+    with st.form("2fa_verify_form"):
+        otp_input = st.text_input("Nhập mã 6 số từ ứng dụng Authy/Google Authenticator:")
+        submitted = st.form_submit_button("Xác thực", type="primary", use_container_width=True)
+        
+        if submitted:
             if verify_totp(existing_secret, otp_input):
-                # Lưu xác thực gắn liền với phiên đăng nhập hiện tại
                 st.session_state.admin_2fa_verified_for = email
                 st.rerun()
             else:
                 st.error("❌ Mã không hợp lệ hoặc đã hết hạn!")
-    with col2:
-        if st.button("Hủy & Đăng xuất", use_container_width=True):
-            st.session_state.clear()
-            st.rerun()
+                
+    if st.button("Hủy & Đăng xuất", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
 
 def render_2fa_setup_tool():
     """Giao diện Cài đặt 2FA (Chỉ dành cho Admin)."""
@@ -97,33 +96,37 @@ def render_2fa_setup_tool():
         st.markdown(f"*(Hoặc nhập mã thủ công: **`{st.session_state.temp_secret}`**)*")
         
         st.markdown("3. Nhập mã 6 số hiện trên ứng dụng để xác nhận kích hoạt:")
-        otp_input = st.text_input("Mã xác nhận (6 số):", key="setup_otp")
-        
-        if st.button("Kích hoạt 2FA", type="primary"):
-            if verify_totp(st.session_state.temp_secret, otp_input):
-                set_user_totp_secret(email, st.session_state.temp_secret)
-                st.success("🎉 Bật 2FA thành công! Cài đặt đã được lưu lại.")
-                st.rerun()
-            else:
-                st.error("❌ Mã không hợp lệ, vui lòng kiểm tra lại!")
+        with st.form("2fa_setup_form"):
+            otp_input = st.text_input("Mã xác nhận (6 số):", key="setup_otp")
+            submitted_setup = st.form_submit_button("Kích hoạt 2FA", type="primary", use_container_width=True)
+            
+            if submitted_setup:
+                if verify_totp(st.session_state.temp_secret, otp_input):
+                    set_user_totp_secret(email, st.session_state.temp_secret)
+                    st.success("🎉 Bật 2FA thành công! Cài đặt đã được lưu lại.")
+                    st.rerun()
+                else:
+                    st.error("❌ Mã không hợp lệ, vui lòng kiểm tra lại!")
 
 def render_change_password_tool(email):
     """Giao diện Đổi mật khẩu dành cho mọi User."""
     st.subheader("🔑 Đổi mật khẩu")
-    old_pw = st.text_input("Mật khẩu hiện tại:", type="password")
-    new_pw = st.text_input("Mật khẩu mới:", type="password")
-    confirm_pw = st.text_input("Xác nhận mật khẩu mới:", type="password")
-    
-    if st.button("Lưu thay đổi", type="primary"):
-        if not verify_user(email, old_pw):
-            st.error("Mật khẩu hiện tại không chính xác!")
-        elif new_pw != confirm_pw:
-            st.error("Mật khẩu xác nhận không khớp!")
-        elif len(new_pw) < 6:
-            st.error("Mật khẩu mới phải có ít nhất 6 ký tự.")
-        else:
-            update_password(email, new_pw)
-            st.success("Đổi mật khẩu thành công! Các lần đăng nhập sau vui lòng dùng mật khẩu mới.")
+    with st.form("change_password_form"):
+        old_pw = st.text_input("Mật khẩu hiện tại:", type="password")
+        new_pw = st.text_input("Mật khẩu mới:", type="password")
+        confirm_pw = st.text_input("Xác nhận mật khẩu mới:", type="password")
+        submitted_pw = st.form_submit_button("Lưu thay đổi", type="primary", use_container_width=True)
+        
+        if submitted_pw:
+            if not verify_user(email, old_pw):
+                st.error("Mật khẩu hiện tại không chính xác!")
+            elif new_pw != confirm_pw:
+                st.error("Mật khẩu xác nhận không khớp!")
+            elif len(new_pw) < 6:
+                st.error("Mật khẩu mới phải có ít nhất 6 ký tự.")
+            else:
+                update_password(email, new_pw)
+                st.success("Đổi mật khẩu thành công! Các lần đăng nhập sau vui lòng dùng mật khẩu mới.")
 
 def reset_view_state():
     """Hàm tự động ẩn giao diện Cài đặt khi người dùng bấm chọn một Công cụ chính."""
@@ -134,7 +137,7 @@ def main():
     apply_custom_styles()
     init_db()
     
-    # 1. Đăng nhập bằng mật khẩu như bình thường
+    # 1. Đăng nhập bằng mật khẩu (hỗ trợ Form để bấm Enter)
     global_auth_guard()
     
     current_user_email = st.session_state.get("utool_user_email", "")
@@ -189,6 +192,9 @@ def main():
             
     st.sidebar.divider()
     st.sidebar.markdown(f"**Tải trọng VPS:** ` {get_active_users_count()}/{MAX_CONCURRENT_USERS} ` 🟢")
+    
+    # HIỂN THỊ TÊN EMAIL NGƯỜI DÙNG VÀ NÚT ĐĂNG XUẤT
+    st.sidebar.markdown(f"👤 **Tài khoản:** `{current_user_email}`")
     
     # Nút Đăng xuất
     if st.sidebar.button("Đăng xuất", type="secondary", use_container_width=True):
