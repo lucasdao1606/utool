@@ -81,7 +81,13 @@ def render_spec_auditor_tool():
         st.session_state.stop_process = False
 
     try:
-        gemini_api_key = st.secrets.get("GEMINI_API_KEY", "")
+        # Lấy danh sách Keys
+        gemini_keys = st.secrets.get("GEMINI_API_KEYS", [])
+        # Fallback (dự phòng): nếu file secrets vẫn dùng cấu hình cũ
+        if not gemini_keys:
+            old_key = st.secrets.get("GEMINI_API_KEY", "")
+            gemini_keys = [old_key] if old_key else []
+            
         mouser_section = st.secrets.get("mouser", {})
         mouser_api_key = mouser_section.get("api_key", "")
         digikey_section = st.secrets.get("digikey", {})
@@ -90,11 +96,11 @@ def render_spec_auditor_tool():
         
         with st.expander("🔍 KIỂM TRA TRẠNG THÁI API", expanded=False):
             col_k1, col_k2, col_k3 = st.columns(3)
-            col_k1.write(f"- Gemini AI: {'✅ Đã nhận' if gemini_api_key else '❌ Trống'}")
+            col_k1.write(f"- Gemini AI: {'✅ Đã nhận (' + str(len(gemini_keys)) + ' keys)' if gemini_keys else '❌ Trống'}")
             col_k2.write(f"- DigiKey: {'✅ Đã nhận' if (digikey_client and digikey_secret) else '❌ Trống'}")
             col_k3.write(f"- Mouser: {'✅ Đã nhận' if mouser_api_key else '❌ Trống'}")
     except Exception:
-        gemini_api_key, mouser_api_key, digikey_client, digikey_secret = "", "", "", ""
+        gemini_keys, mouser_api_key, digikey_client, digikey_secret = [], "", "", ""
 
     st.markdown("### 🎛️ Chọn Chế độ hoạt động")
     app_mode = st.radio(
@@ -156,9 +162,18 @@ def render_spec_auditor_tool():
                 saved_count = 0
                 for up_file in uploaded_pdfs:
                     dest_path = os.path.join(current_work_dir, up_file.name)
-                    with open(dest_path, "wb") as f:
-                        shutil.copyfileobj(up_file, f, length=64 * 1024)
-                    saved_count += 1
+                    try:
+                        # Đảm bảo con trỏ stream nằm ở đầu file trước khi đọc
+                        up_file.seek(0)
+                        
+                        # Ghi file theo từng chunk 64KB để không làm treo RAM VPS
+                        with open(dest_path, "wb") as f:
+                            shutil.copyfileobj(up_file, f, length=64 * 1024)
+                            
+                        saved_count += 1
+                    except Exception as e:
+                        st.error(f"❌ Có lỗi khi lưu file '{up_file.name}': {e}")
+                        
                 if saved_count > 0:
                     st.success(f"✅ Đã lưu an toàn {saved_count} file PDF vào hệ thống.")
 
@@ -311,8 +326,12 @@ def render_spec_auditor_tool():
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
 
+            # --- CƠ CHẾ LUÂN PHIÊN KEY (ROUND-ROBIN) ---
+            # Xoay vòng key dựa trên số thứ tự (idx) của linh kiện
+            current_key = gemini_keys[idx % len(gemini_keys)] if gemini_keys else ""
+
             try:
-                pages = extract_pdf_pages(file_bytes=pdf_bytes, api_key=gemini_api_key.strip(), log_callback=log_msg)
+                pages = extract_pdf_pages(file_bytes=pdf_bytes, api_key=current_key.strip(), log_callback=log_msg)
                 pdf_full_text = "\n\n".join([f"--- TRANG {p['page_num']} ---\n{p['text']}" for p in pages])
             except Exception as e:
                 pdf_full_text = ""
@@ -322,9 +341,9 @@ def render_spec_auditor_tool():
             gc.collect()
 
             if is_mode_audit:
-                res = audit_single_item_llm(item=item, pdf_name=pdf_name, pdf_text=pdf_full_text, api_key=gemini_api_key.strip())
+                res = audit_single_item_llm(item=item, pdf_name=pdf_name, pdf_text=pdf_full_text, api_key=current_key.strip())
             else:
-                res = generate_specs_llm(item=item, pdf_name=pdf_name, pdf_text=pdf_full_text, api_key=gemini_api_key.strip())
+                res = generate_specs_llm(item=item, pdf_name=pdf_name, pdf_text=pdf_full_text, api_key=current_key.strip())
 
             del pdf_full_text
             gc.collect()
