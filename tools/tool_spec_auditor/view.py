@@ -6,6 +6,7 @@ import time
 import zipfile
 import io
 import gc
+import shutil
 from datetime import datetime
 
 # Import db để giữ kết nối không bị timeout
@@ -18,8 +19,13 @@ from .engine_llm import audit_single_item_llm, generate_specs_llm
 from .models import ItemAuditResult
 from .api_datasheet import auto_fetch_datasheet
 
-DATASHEET_DIR = os.path.abspath(os.path.join(os.getcwd(), "datasheets"))
+# GIỮ NGUYÊN GỐC CHO MODE 3
+DATASHEET_DIR = os.path.abspath(os.path.join(os.getcwd(), "datasheets")) 
+# TẠO THÊM THƯ MỤC RIÊNG CHO MODE 1 & 2
+DATASHEET_MANUAL_DIR = os.path.abspath(os.path.join(os.getcwd(), "datasheets_manual"))
+
 os.makedirs(DATASHEET_DIR, exist_ok=True)
+os.makedirs(DATASHEET_MANUAL_DIR, exist_ok=True)
 
 # Các đường dẫn đến file template nằm sẵn trong dự án
 TEMPLATE_FILES = {
@@ -53,6 +59,20 @@ def create_zip_of_datasheets(folder_path: str) -> bytes:
                 file_path = os.path.join(folder_path, file_name)
                 zip_file.write(file_path, arcname=file_name)
     return zip_buffer.getvalue()
+
+def clear_folder_contents(folder_path: str) -> int:
+    """Hàm dọn sạch toàn bộ file PDF trong thư mục được chỉ định."""
+    deleted_count = 0
+    if not os.path.exists(folder_path):
+        return 0
+    for fname in os.listdir(folder_path):
+        if fname.lower().endswith('.pdf'):
+            try:
+                os.remove(os.path.join(folder_path, fname))
+                deleted_count += 1
+            except Exception:
+                pass
+    return deleted_count
 
 def render_spec_auditor_tool():
     st.subheader("🔬 Trợ lý Kỹ thuật: Đánh giá & Xây dựng Chỉ tiêu (AI)")
@@ -91,6 +111,9 @@ def render_spec_auditor_tool():
     elif "Chế độ 2" in app_mode: mode_idx = 2
     else: mode_idx = 3
     is_mode_audit = mode_idx in [1, 3]
+
+    # Mode 3 dùng thư mục gốc, Mode 1 & 2 dùng thư mục Manual
+    current_work_dir = DATASHEET_DIR if mode_idx == 3 else DATASHEET_MANUAL_DIR
     
     st.divider()
 
@@ -118,18 +141,37 @@ def render_spec_auditor_tool():
 
     with col2:
         st.markdown("#### 2. Thư mục lưu Datasheet")
-        st.info("📂 **Đường dẫn thực tế trên ổ cứng của bạn đang nằm ở đây:**")
-        st.code(DATASHEET_DIR, language="bash")
+        
+        if mode_idx in [1, 2]:
+            st.markdown("**Tải lên file Datasheet (PDF):**")
+            uploaded_pdfs = st.file_uploader(
+                "Chọn một hoặc nhiều file PDF (Tên file bắt đầu bằng số TT, ví dụ: 1_datasheet.pdf)", 
+                type=["pdf"], 
+                accept_multiple_files=True,
+                key=f"pdf_uploader_{mode_idx}"
+            )
+            
+            # Ghi file xuống ổ đĩa theo cơ chế Stream/Buffer từng phần để chống tràn RAM
+            if uploaded_pdfs:
+                saved_count = 0
+                for up_file in uploaded_pdfs:
+                    dest_path = os.path.join(current_work_dir, up_file.name)
+                    with open(dest_path, "wb") as f:
+                        shutil.copyfileobj(up_file, f, length=64 * 1024)
+                    saved_count += 1
+                if saved_count > 0:
+                    st.success(f"✅ Đã lưu an toàn {saved_count} file PDF vào hệ thống.")
 
-        current_files = [f for f in os.listdir(DATASHEET_DIR) if f.lower().endswith('.pdf')]
+        st.info("📂 **Đường dẫn thư mục lưu trữ:**")
+        st.code(current_work_dir, language="bash")
+
+        current_files = [f for f in os.listdir(current_work_dir) if f.lower().endswith('.pdf')]
         total_pdfs = len(current_files)
-        st.success(f"📦 Đang có sẵn **{total_pdfs}** file Datasheet đã được lưu.")
+        st.success(f"📦 Đang có sẵn **{total_pdfs}** file Datasheet trong thư mục.")
         
         if total_pdfs > 0:
-            if st.button("🗑️ Xóa sạch thư mục Datasheet", use_container_width=True):
-                for fname in current_files:
-                    try: os.remove(os.path.join(DATASHEET_DIR, fname))
-                    except: pass
+            if st.button("🗑️ Xóa sạch thư mục Datasheet này", use_container_width=True):
+                clear_folder_contents(current_work_dir)
                 st.rerun()
 
     if not excel_file:
@@ -150,23 +192,30 @@ def render_spec_auditor_tool():
 
     items_to_process = []
     if "ĐÃ CÓ file" in scope_option:
-        items_to_process = [it for it in target_items if find_datasheet_name_for_tt(it.tt, DATASHEET_DIR)]
+        items_to_process = [it for it in target_items if find_datasheet_name_for_tt(it.tt, current_work_dir)]
     elif "Chạy thử 5 mục" in scope_option:
         items_to_process = target_items[:5]
     else:
         items_to_process = target_items
 
     # =====================================================================
-    # NÚT HỎI DỌN DẸP DÀNH RIÊNG CHO MODE 3
+    # CÁC TÙY CHỌN DỌN DẸP DỮ LIỆU
     # =====================================================================
     clear_old_datasheets = False
     if mode_idx == 3:
         st.markdown("##### ⚙️ Tùy chọn dọn dẹp (Mode 3)")
         clear_old_datasheets = st.checkbox(
             "🗑️ Xóa sạch toàn bộ file Datasheet cũ trước khi bắt đầu quét API", 
-            value=True, # Mặc định tick sẵn
+            value=True,
             help="Nên chọn để tránh hệ thống lấy nhầm file PDF tồn dư từ các lần chạy trước."
         )
+
+    # Tùy chọn xóa dữ liệu thư mục sau khi hoàn thành đánh giá (dành cho cả 3 mode)
+    auto_clean_after = st.checkbox(
+        "🧹 Tự động xóa sạch thư mục Datasheet sau khi hoàn tất phiên làm việc",
+        value=False,
+        help="Giúp giải phóng hoàn toàn dung lượng ổ cứng VPS ngay sau khi bạn tải xong file kết quả."
+    )
 
     col_start, col_stop = st.columns(2)
     start_btn = col_start.button("🚀 BẮT ĐẦU TIẾN TRÌNH", type="primary", use_container_width=True)
@@ -209,16 +258,10 @@ def render_spec_auditor_tool():
                 except Exception:
                     pass
 
-        # --- THỰC THI LỆNH XÓA NẾU NGƯỜI DÙNG ĐỒNG Ý ---
+        # --- THỰC THI LỆNH XÓA DỌN DẸP DÀNH RIÊNG CHO MODE 3 ---
         if mode_idx == 3 and clear_old_datasheets:
-            log_msg("🧹 Đang dọn dẹp dữ liệu cũ...")
-            deleted_count = 0
-            for fname in os.listdir(DATASHEET_DIR):
-                if fname.lower().endswith('.pdf'):
-                    try: 
-                        os.remove(os.path.join(DATASHEET_DIR, fname))
-                        deleted_count += 1
-                    except: pass
+            log_msg("🧹 Đang dọn dẹp dữ liệu cũ trong thư mục Auto...")
+            deleted_count = clear_folder_contents(current_work_dir)
             if deleted_count > 0:
                 log_msg(f"✅ Đã dọn sạch {deleted_count} file PDF tồn dư. Bắt đầu phiên làm việc mới!")
             else:
@@ -237,12 +280,12 @@ def render_spec_auditor_tool():
             ph_total.metric("Tổng số mục", f"{step_num}/{total_steps}")
             log_msg(f"Bắt đầu xử lý: {item.name}")
 
-            pdf_name = find_datasheet_name_for_tt(item.tt, DATASHEET_DIR)
+            pdf_name = find_datasheet_name_for_tt(item.tt, current_work_dir)
 
             if not pdf_name and mode_idx == 3:
                 log_msg(f"🌐 Đang quét API cho: '{item.part_number}'...")
                 downloaded_name = auto_fetch_datasheet(
-                    part_number=item.part_number, tt=item.tt, save_dir=DATASHEET_DIR,
+                    part_number=item.part_number, tt=item.tt, save_dir=current_work_dir,
                     mouser_key=mouser_api_key, dk_client=digikey_client, dk_secret=digikey_secret
                 )
                 if downloaded_name:
@@ -263,7 +306,7 @@ def render_spec_auditor_tool():
                 audit_results.append(res)
                 continue
 
-            pdf_path = os.path.join(DATASHEET_DIR, pdf_name)
+            pdf_path = os.path.join(current_work_dir, pdf_name)
             
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
@@ -297,6 +340,12 @@ def render_spec_auditor_tool():
 
             time.sleep(1)
 
+        # Xóa tự động sau đánh giá nếu người dùng bật tùy chọn
+        if auto_clean_after and not st.session_state.stop_process:
+            log_msg("🧹 Đang thực hiện dọn dẹp thư mục sau khi hoàn thành đánh giá...")
+            cleared_cnt = clear_folder_contents(current_work_dir)
+            log_msg(f"✅ Đã dọn dẹp xong {cleared_cnt} file trong thư mục làm việc.")
+
         if st.session_state.stop_process:
             status_box.warning("⚠️ Tiến trình đã được dừng bởi người dùng. Bạn có thể tải kết quả các mục đã xử lý bên dưới.")
             st.session_state.stop_process = False
@@ -329,7 +378,7 @@ def render_spec_auditor_tool():
             )
             
         with col_btn2:
-            zip_data = create_zip_of_datasheets(DATASHEET_DIR)
+            zip_data = create_zip_of_datasheets(current_work_dir)
             st.download_button(
                 label="📚 Tải file nén toàn bộ Datasheet (ZIP)",
                 data=zip_data,
