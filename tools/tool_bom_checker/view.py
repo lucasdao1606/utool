@@ -8,26 +8,17 @@ from tools.tool_bom_checker.engine import (
 )
 
 def get_secret_safely(section: str, key: str, fallback_flat_key: str = "") -> str:
-    """Hàm trích xuất API key an toàn tuyệt đối từ Streamlit secrets hoặc biến môi trường"""
+    # [Giữ nguyên hàm này như cũ]
     try:
-        # Cách 1: Theo nhóm [section] -> key
         if section in st.secrets and key in st.secrets[section]:
             val = str(st.secrets[section][key]).strip()
-            if val:
-                return val
-    except Exception:
-        pass
-
+            if val: return val
+    except Exception: pass
     try:
-        # Cách 2: Theo key dạng phẳng ví dụ: mouser_api_key
         if fallback_flat_key and fallback_flat_key in st.secrets:
             val = str(st.secrets[fallback_flat_key]).strip()
-            if val:
-                return val
-    except Exception:
-        pass
-
-    # Cách 3: Lấy từ Environment Variable
+            if val: return val
+    except Exception: pass
     env_val = os.environ.get(f"{section.upper()}_{key.upper()}", "") or os.environ.get(fallback_flat_key.upper(), "")
     return env_val.strip()
 
@@ -36,12 +27,29 @@ def render_bom_checker_tool():
     st.caption("Tự động tra cứu tồn kho, đơn giá tối ưu, đề xuất mã thay thế R&D và xuất báo cáo chuẩn hóa.")
 
     # 1. TỰ ĐỘNG NẠP API KEYS NGẦM AN TOÀN
-    mouser_k = get_secret_safely("mouser", "api_key", "mouser_api_key")
-    digikey_id = get_secret_safely("digikey", "client_id", "digikey_client_id")
-    digikey_sec = get_secret_safely("digikey", "client_secret", "digikey_client_secret")
-    oem_k = get_secret_safely("oemsecrets", "api_key", "oemsecrets_api_key")
-    nexar_id = get_secret_safely("nexar", "client_id", "nexar_client_id")
-    nexar_sec = get_secret_safely("nexar", "client_secret", "nexar_client_secret")
+    mouser_k = get_secret_safely("mouser", "api_key")
+    digikey_id = get_secret_safely("digikey", "client_id")
+    digikey_sec = get_secret_safely("digikey", "client_secret")
+    oem_k = get_secret_safely("oemsecrets", "api_key")
+    nexar_id = get_secret_safely("nexar", "client_id")
+    nexar_sec = get_secret_safely("nexar", "client_secret")
+
+    # XỬ LÝ ĐẶC BIỆT CHO MẢNG GEMINI KEYS
+    gemini_keys = []
+    try:
+        if "GEMINI_API_KEYS" in st.secrets:
+            keys_data = st.secrets["GEMINI_API_KEYS"]
+            if isinstance(keys_data, list):
+                gemini_keys = [str(k).strip() for k in keys_data if k]
+            elif isinstance(keys_data, str):
+                gemini_keys = [keys_data.strip()]
+    except Exception:
+        pass
+    
+    # Fallback nếu cấu hình cũ
+    if not gemini_keys:
+        k = get_secret_safely("gemini", "api_key", "gemini_api_key")
+        if k: gemini_keys = [k]
 
     config = {
         "mouser_key": mouser_k,
@@ -49,7 +57,8 @@ def render_bom_checker_tool():
         "digikey_secret": digikey_sec,
         "oemsecrets_key": oem_k,
         "nexar_id": nexar_id,
-        "nexar_secret": nexar_sec
+        "nexar_secret": nexar_sec,
+        "gemini_keys": gemini_keys  # Lưu dưới dạng mảng (list)
     }
 
     # 2. KHU VỰC TẢI FILE & TEMPLATE
@@ -97,17 +106,15 @@ def render_bom_checker_tool():
             if not config.get("mouser_key") and not config.get("digikey_id"):
                 st.error("❌ Không tìm thấy API Key nào trong file `.streamlit/secrets.toml`. Vui lòng kiểm tra lại file cấu hình.")
                 return
+            if not config.get("gemini_keys"):
+                st.warning("⚠️ Không tìm thấy GEMINI_API_KEYS. Tính năng tạo 'Yêu Cầu Kỹ Thuật' tự động sẽ bị bỏ qua.")
 
             prog_bar = st.progress(0.0)
             status_txt = st.empty()
             debug_logs = []
 
-            # In xác nhận dạng che dấu để kiểm tra nạp key thành công
-            m_key = config.get("mouser_key", "")
-            if m_key:
-                debug_logs.append(f"🔐 Đã nạp Mouser API Key ngầm: {m_key[:4]}...{m_key[-4:]} (độ dài: {len(m_key)} ký tự)")
-            else:
-                debug_logs.append("⚠️ Không đọc được Mouser API Key từ secrets.")
+            if config.get("gemini_keys"):
+                debug_logs.append(f"🤖 Đã nạp thành công {len(config['gemini_keys'])} Gemini API Keys để cân bằng tải.")
 
             try:
                 with st.spinner("Đang kết nối kho dữ liệu toàn cầu & phân tích linh kiện tương đương..."):
@@ -153,7 +160,7 @@ def render_bom_checker_tool():
 
         excel_bytes = generate_styled_excel(results)
         st.download_button(
-            label="📥 Tải Xuống Báo Cáo BOM Master Hoàn Chỉnh (Excel)",
+            label="📥 Tải Xuống Báo Cáo BOM Master",
             data=excel_bytes,
             file_name=f"BOM_Master_Report_{uploaded_file.name if uploaded_file else 'data'}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -161,7 +168,6 @@ def render_bom_checker_tool():
             use_container_width=True
         )
 
-    # Hiển thị Debug Logs nếu cần kiểm tra
     if "bom_debug_logs" in st.session_state and st.session_state["bom_debug_logs"]:
         has_issue = ("bom_check_results" in st.session_state and kpi_ready == 0 and kpi_partial == 0)
         with st.expander("🛠️ Xem nhật ký phản hồi API (Debug Logs)", expanded=has_issue):

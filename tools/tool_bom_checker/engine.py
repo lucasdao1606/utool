@@ -1,12 +1,16 @@
+# Module BOM Checker
 import io
 import re
 import time
 import base64
+import random
 import requests
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+from google import genai
 
 # ==========================================
 # 1. TẠO FILE BOM TEMPLATE CHUẨN MẪU
@@ -35,11 +39,9 @@ def generate_sample_bom_template() -> bytes:
 # 2. BỘ LỌC TỪ KHÓA MÔ TẢ TỐI ƯU
 # ==========================================
 def clean_description_for_search(desc: str) -> str:
-    """Lọc bỏ toàn bộ thông tin đóng gói, chứng chỉ để trích xuất thông số cốt lõi"""
     if not desc or desc == "-":
         return ""
     
-    # Danh sách từ gây nhiễu
     noise_words = [
         "rohs", "rohs3", "pb free", "lead free", "pb-free", "compliant",
         "reel", "tape", "cut tape", "digi-reel", "tube", "tray", "bulk",
@@ -51,16 +53,13 @@ def clean_description_for_search(desc: str) -> str:
     for w in noise_words:
         text = re.sub(rf"\b{re.escape(w)}\b", " ", text)
     
-    # Loại bỏ ký tự đặc biệt không cần thiết
     text = re.sub(r"[,;:/\\()\[\]{}*+]", " ", text)
     tokens = [w.strip() for w in text.split() if len(w.strip()) > 1]
     
-    # Giữ lại tối đa 4 từ khóa thông số kỹ thuật cốt lõi nhất
     return " ".join(tokens[:4])
 
 
 def is_different_manufacturer(mfg1: str, mfg2: str) -> bool:
-    """Kiểm tra 2 nhà sản xuất có khác nhau không (loại bỏ biến thể tên công ty)"""
     if not mfg1 or not mfg2 or mfg1 == "-" or mfg2 == "-":
         return True
     
@@ -71,6 +70,102 @@ def is_different_manufacturer(mfg1: str, mfg2: str) -> bool:
         return mfg1.lower().strip() != mfg2.lower().strip()
         
     return clean_1 not in clean_2 and clean_2 not in clean_1
+
+
+# ==========================================
+# 2.5 HÀM TRỢ GIÚP TRÍCH XUẤT & TỔNG HỢP SPEC BẰNG GEMINI
+# ==========================================
+def _extract_parameters(product_data: dict) -> dict:
+    params = product_data.get("Parameters", [])
+    if not params: 
+        return {}
+    return {p.get("ParameterText", ""): p.get("ValueText", "") for p in params}
+
+# Danh sách model thực tế khả dụng
+_AVAILABLE_MODELS = [
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-2.5-flash',
+    'gemini-flash-latest'
+]
+
+def build_spec_baseline_with_gemini(api_keys: list, base_mpn: str, base_data: dict, alt1_data: dict, alt2_data: dict, debug_logs: list = None) -> str:
+    if not api_keys:
+        return "Vui lòng cấu hình Gemini API Key."
+    
+    prompt = f"""
+    Bạn là một kỹ sư linh kiện điện tử (Component Engineer). 
+    Hãy xây dựng "Bảng Yêu Cầu Kỹ Thuật (Spec Baseline)" làm tiêu chuẩn mua hàng.
+    Tiêu chuẩn phải BAO HÀM và ĐÁP ỨNG được cả 3 mã sau bằng quy tắc chặn trên/dưới (Min/Max):
+
+    1. Mã gốc: {base_mpn} | Thông số: {base_data.get('parameters', base_data.get('description'))}
+    2. Mã thay thế 1: {alt1_data.get('mpn')} | Thông số: {alt1_data.get('parameters', alt1_data.get('description'))}
+    3. Mã thay thế 2: {alt2_data.get('mpn')} | Thông số: {alt2_data.get('parameters', alt2_data.get('description'))}
+
+    YÊU CẦU ĐỊNH DẠNG NGHIÊM NGẶT:
+    - Xuất trực tiếp dưới dạng danh sách gạch đầu dòng (bắt đầu bằng dấu trừ "-").
+    - TUYỆT ĐỐI KHÔNG dùng ký hiệu in đậm (**).
+    - TỐI ĐA HÓA việc sử dụng các ký hiệu toán học (≥, ≤, ~ hoặc -) thay vì dùng chữ (ví dụ: dùng "≥ 120 MHz" thay vì "tối thiểu 120 MHz", dùng "1.71V - 5.5V" thay vì "từ 1.71V đến 5.5V").
+    - Ngắn gọn, chuyên nghiệp, không giải thích thêm. Viết bằng tiếng Việt.
+    """
+    
+    # Random list key để cân bằng tải
+    keys_to_try = list(api_keys)
+    random.shuffle(keys_to_try)
+    errors_log = []
+
+    for key in keys_to_try:
+        try:
+            client = genai.Client(api_key=key)
+        except Exception as e:
+            errors_log.append(f"Lỗi khởi tạo Client (Key ...{key[-4:]}): {e}")
+            continue
+
+        for model_name in _AVAILABLE_MODELS:
+            max_retries = 2
+            retries = 0
+            
+            while retries <= max_retries:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                    )
+                    if response and response.text:
+                        if debug_logs is not None:
+                            debug_logs.append(f"🤖 [Gemini] Thành công tạo Spec với {model_name} (Key ...{key[-4:]})")
+                        return response.text.strip()
+                    else:
+                        raise ValueError("Phản hồi rỗng hoặc bị Google chặn (Safety Block).")
+                        
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    
+                    if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
+                        if retries < max_retries:
+                            wait_time = 2 * (2 ** retries)
+                            if debug_logs is not None:
+                                debug_logs.append(f"⚠️ [API Rate Limit] {model_name} quá tải. Chờ {wait_time}s...")
+                            time.sleep(wait_time)
+                            retries += 1
+                            continue 
+                        else:
+                            errors_log.append(f"{model_name} (Hết lượt truy cập 429)")
+                            break 
+                    
+                    elif "404" in error_msg or "not found" in error_msg:
+                        errors_log.append(f"{model_name} (Bị khóa/404)")
+                        break 
+                    else:
+                        errors_log.append(f"{model_name} ({str(e)})")
+                        break 
+            
+    if debug_logs is not None:
+        debug_logs.append(f"❌ [Gemini Fail] Toàn bộ lỗi: {'; '.join(errors_log)}")
+        
+    return "Lỗi tạo Spec: Hệ thống AI hiện đang quá tải hoặc không khả dụng."
 
 
 # ==========================================
@@ -99,16 +194,13 @@ def get_digikey_token(client_id: str, client_secret: str, debug_logs: list = Non
     try:
         res = requests.post(url, data=payload, headers=headers, timeout=15)
         if res.status_code != 200:
-            err_details = res.text[:200]
             if debug_logs is not None:
-                debug_logs.append(f"❌ [DigiKey Auth Lỗi {res.status_code}]: {err_details}")
+                debug_logs.append(f"❌ [DigiKey Auth Lỗi {res.status_code}]: {res.text[:200]}")
             return None
 
         d = res.json()
         _DIGIKEY_CACHE["token"] = d.get("access_token")
         _DIGIKEY_CACHE["expires_at"] = now + d.get("expires_in", 86400) - 120
-        if debug_logs is not None:
-            debug_logs.append("🔑 [DigiKey] Cấp phát Access Token thành công.")
         return _DIGIKEY_CACHE["token"]
     except Exception as e:
         if debug_logs is not None:
@@ -117,7 +209,6 @@ def get_digikey_token(client_id: str, client_secret: str, debug_logs: list = Non
 
 
 def search_digikey_alternates_by_keyword(client_id: str, client_secret: str, keyword: str, exclude_mpn: str, exclude_mfg: str, target_qty: int) -> list:
-    """Tìm mã tương đương trên DigiKey: khác nhà sản xuất, ưu tiên còn hàng"""
     if not client_id or not client_secret or not keyword:
         return []
     
@@ -148,13 +239,11 @@ def search_digikey_alternates_by_keyword(client_id: str, client_secret: str, key
                 
             mfg_name = p.get("Manufacturer", {}).get("Name", "-") if isinstance(p.get("Manufacturer"), dict) else str(p.get("Manufacturer", "-"))
             
-            # Bắt buộc: Khác nhà sản xuất với mã gốc
             if not is_different_manufacturer(exclude_mfg, mfg_name):
                 continue
                 
             stock = p.get("QuantityAvailable", 0) or 0
             
-            # Parse đơn giá
             matched_price = None
             pricing = p.get("ProductVariations", [{}])[0].get("StandardPricing", []) if p.get("ProductVariations") else []
             for pr in sorted(pricing, key=lambda x: x.get("BreakQuantity", 0)):
@@ -168,10 +257,11 @@ def search_digikey_alternates_by_keyword(client_id: str, client_secret: str, key
                 "manufacturer": mfg_name,
                 "stock": stock,
                 "price": f"{matched_price} USD" if matched_price else "Liên hệ",
-                "source": "DigiKey"
+                "source": "DigiKey",
+                "description": p.get("ProductDescription", ""),
+                "parameters": _extract_parameters(p)
             })
             
-        # Sắp xếp ưu tiên: Còn stock trước -> Tồn kho giảm dần
         candidates.sort(key=lambda x: (x["stock"] <= 0, -x["stock"]))
         return candidates
     except Exception:
@@ -182,8 +272,6 @@ def query_digikey(client_id: str, client_secret: str, mpn: str, target_qty: int,
     cid = client_id.strip()
     csec = client_secret.strip()
     if not cid or not csec:
-        if debug_logs is not None:
-            debug_logs.append("ℹ️ [DigiKey] Bỏ qua vì chưa cấu hình Client ID/Secret.")
         return {}
 
     clean_mpn = str(mpn).strip()
@@ -215,8 +303,6 @@ def query_digikey(client_id: str, client_secret: str, mpn: str, target_qty: int,
                     products = [p_item]
 
         if not products:
-            if debug_logs is not None:
-                debug_logs.append(f"ℹ️ [DigiKey] Không tìm thấy mã '{clean_mpn}' -> Chuyển Mouser.")
             return {}
 
         best_p = products[0]
@@ -245,13 +331,14 @@ def query_digikey(client_id: str, client_secret: str, mpn: str, target_qty: int,
 
         if debug_logs is not None:
             p_log = f"{matched_price} USD" if matched_price else "Liên hệ"
-            debug_logs.append(f"✅ [DigiKey Primary] '{clean_mpn}': Kho {stock} | Giá {p_log}")
+            debug_logs.append(f"✅ [DigiKey] '{clean_mpn}': Kho {stock} | Giá {p_log}")
 
         return {
             "description": desc,
             "manufacturer": mfg,
             "lifecycle": "Active",
             "datasheet": best_p.get("DatasheetUrl", ""),
+            "parameters": _extract_parameters(best_p),
             "offers": [{
                 "distributor": "DigiKey",
                 "stock": stock,
@@ -262,8 +349,6 @@ def query_digikey(client_id: str, client_secret: str, mpn: str, target_qty: int,
             }]
         }
     except Exception as e:
-        if debug_logs is not None:
-            debug_logs.append(f"⚠️ [DigiKey Exception] '{clean_mpn}': {e} -> Chuyển Mouser.")
         return {}
 
 
@@ -271,7 +356,6 @@ def query_digikey(client_id: str, client_secret: str, mpn: str, target_qty: int,
 # 4. MOUSER SEARCH ENGINES (ĐỐI SÁNH & CROSS-REF BỔ TRỢ)
 # ==========================================
 def search_mouser_alternates_by_keyword(api_key: str, keyword: str, exclude_mpn: str, exclude_mfg: str, target_qty: int) -> list:
-    """Tìm mã tương đương trên Mouser: khác nhà sản xuất, ưu tiên còn hàng"""
     if not api_key or not keyword:
         return []
     clean_key = str(api_key).strip().replace('"', '').replace("'", "")
@@ -320,7 +404,9 @@ def search_mouser_alternates_by_keyword(api_key: str, keyword: str, exclude_mpn:
                 "manufacturer": mfg_name,
                 "stock": stock,
                 "price": f"{price_val} {currency}" if price_val else "Liên hệ",
-                "source": "Mouser"
+                "source": "Mouser",
+                "description": p.get("Description", ""),
+                "parameters": {}
             })
             
         candidates.sort(key=lambda x: (x["stock"] <= 0, -x["stock"]))
@@ -346,14 +432,10 @@ def query_mouser_part(api_key: str, mpn: str, target_qty: int, ref_desc: str = "
     try:
         res = requests.post(url, params=params, json=payload, headers=headers, timeout=15)
         if res.status_code != 200:
-            if debug_logs is not None:
-                debug_logs.append(f"⚠️ [Mouser HTTP {res.status_code}] '{clean_mpn}'.")
             return {}
         data = res.json()
         parts = data.get("SearchResults", {}).get("Parts", [])
         if not parts:
-            if debug_logs is not None:
-                debug_logs.append(f"ℹ️ [Mouser] Không tìm thấy mã '{clean_mpn}'.")
             return {}
 
         primary = parts[0]
@@ -385,7 +467,7 @@ def query_mouser_part(api_key: str, mpn: str, target_qty: int, ref_desc: str = "
 
         if debug_logs is not None:
             p_log = f"{matched_price} {currency}" if matched_price else "Liên hệ"
-            debug_logs.append(f"✅ [Mouser Secondary] '{clean_mpn}': Kho {stock} | Giá {p_log}")
+            debug_logs.append(f"✅ [Mouser] '{clean_mpn}': Kho {stock} | Giá {p_log}")
 
         return {
             "description": desc,
@@ -401,9 +483,7 @@ def query_mouser_part(api_key: str, mpn: str, target_qty: int, ref_desc: str = "
                 "is_stock_enough": stock >= target_qty
             }]
         }
-    except Exception as e:
-        if debug_logs is not None:
-            debug_logs.append(f"⚠️ [Mouser Exception] '{clean_mpn}': {e}")
+    except Exception:
         return {}
 
 
@@ -434,8 +514,6 @@ def query_oemsecrets(api_key: str, mpn: str, target_qty: int, debug_logs: list =
                 "currency": p.get("currency", "USD"),
                 "is_stock_enough": stock >= target_qty
             })
-        if debug_logs is not None and offers:
-            debug_logs.append(f"✅ [OEMsecrets] '{clean_mpn}': Nhận {len(offers)} báo giá.")
         return {"offers": offers} if offers else {}
     except Exception:
         return {}
@@ -537,7 +615,6 @@ def query_nexar(client_id: str, client_secret: str, mpn: str, target_qty: int, d
 # 7. HÀM CHÍNH ĐIỀU PHỐI VÀ TÌM CROSS-REFERENCE
 # ==========================================
 def fetch_cross_references(keyword: str, exclude_mpn: str, exclude_mfg: str, target_qty: int, config: dict) -> list:
-    """Thuật toán tìm mã tương đương: Lọc mô tả -> DigiKey -> Fallback sang Mouser"""
     if not keyword:
         return []
         
@@ -545,7 +622,6 @@ def fetch_cross_references(keyword: str, exclude_mpn: str, exclude_mfg: str, tar
     seen_mpns = {exclude_mpn.lower()}
     seen_mfgs = set()
 
-    # 1. Quét trước trên DigiKey
     dk_alts = search_digikey_alternates_by_keyword(
         config.get("digikey_id", ""),
         config.get("digikey_secret", ""),
@@ -564,7 +640,6 @@ def fetch_cross_references(keyword: str, exclude_mpn: str, exclude_mfg: str, tar
             if len(alternates) == 2:
                 break
 
-    # 2. Nếu DigiKey chưa đủ 2 mã khác hãng, gọi tiếp Mouser để bổ sung
     if len(alternates) < 2 and config.get("mouser_key"):
         mouser_alts = search_mouser_alternates_by_keyword(
             config.get("mouser_key", ""),
@@ -610,9 +685,10 @@ def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str,
         mfg = str(row.get("Manufacturer", "")) if "Manufacturer" in row and pd.notna(row.get("Manufacturer")) else "-"
         lifecycle = "Active"
         datasheet = ""
+        base_params = {}
 
         # ====================================================
-        # BƯỚC 1: TRUY VẤN DIGIKEY (ƯU TIÊN 1 - CHUẨN THAM CHIẾU)
+        # BƯỚC 1: TRUY VẤN DIGIKEY
         # ====================================================
         dk_res = query_digikey(config.get("digikey_id", ""), config.get("digikey_secret", ""), mpn, qty, debug_logs)
         if dk_res:
@@ -620,10 +696,11 @@ def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str,
             mfg = dk_res.get("manufacturer") or mfg
             lifecycle = dk_res.get("lifecycle") or lifecycle
             datasheet = dk_res.get("datasheet") or datasheet
+            base_params = dk_res.get("parameters", {})
             all_offers.extend(dk_res.get("offers", []))
 
         # ====================================================
-        # BƯỚC 2: TRUY VẤN MOUSER (ƯU TIÊN 2 - ĐỐI SÁNH GIÁ)
+        # BƯỚC 2: TRUY VẤN MOUSER
         # ====================================================
         mouser_res = query_mouser_part(config.get("mouser_key", ""), mpn, qty, ref_desc=description, debug_logs=debug_logs)
         if mouser_res:
@@ -636,20 +713,35 @@ def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str,
             all_offers.extend(mouser_res.get("offers", []))
 
         # ====================================================
-        # BƯỚC 3: TÌM MÃ TƯƠNG ĐƯƠNG (KHÁC NSX, ƯU TIÊN CÒN KHO)
+        # BƯỚC 3: TÌM MÃ TƯƠNG ĐƯƠNG
         # ====================================================
         clean_kw = clean_description_for_search(description)
         alternates = fetch_cross_references(clean_kw, mpn, mfg, qty, config)
 
-        if debug_logs is not None:
-            if alternates:
-                alt_names = [f"{a['mpn']} ({a['manufacturer']} | Kho: {a['stock']})" for a in alternates]
-                debug_logs.append(f"💡 [Cross-Ref] Tìm thấy {len(alternates)} mã thay thế khác hãng: {', '.join(alt_names)}")
-            else:
-                debug_logs.append("ℹ️ [Cross-Ref] Không tìm thấy mã tương đương khác hãng phù hợp.")
+        # ====================================================
+        # BƯỚC 4: TỔNG HỢP SPEC BASELINE BẰNG GEMINI
+        # ====================================================
+        alt_2 = alternates[0] if len(alternates) > 0 else {}
+        alt_3 = alternates[1] if len(alternates) > 1 else {}
+        spec_baseline = ""
+        
+        gemini_keys = config.get("gemini_keys", [])
+        if gemini_keys and (alt_2 or alt_3):
+            if status_text:
+                status_text.caption(f"Đang tổng hợp Bảng Yêu Cầu Kỹ Thuật cho: {mpn} bằng AI...")
+            
+            base_data_for_ai = {"parameters": base_params, "description": description}
+            spec_baseline = build_spec_baseline_with_gemini(
+                api_keys=gemini_keys,
+                base_mpn=mpn,
+                base_data=base_data_for_ai,
+                alt1_data=alt_2,
+                alt2_data=alt_3,
+                debug_logs=debug_logs
+            )
 
         # ====================================================
-        # BƯỚC 4: OEMSECRETS & NEXAR (DỰ PHÒNG KHI CẦN)
+        # BƯỚC 5: OEMSECRETS & NEXAR
         # ====================================================
         oem_res = query_oemsecrets(config.get("oemsecrets_key", ""), mpn, qty, debug_logs)
         if oem_res:
@@ -662,14 +754,8 @@ def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str,
                     description = nx_res.get("description") or "-"
                 all_offers.extend(nx_res.get("offers", []))
 
-        # Tách riêng Mã tương đương 2 & 3
-        alt_2 = alternates[0] if len(alternates) > 0 else {}
-        alt_3 = alternates[1] if len(alternates) > 1 else {}
-
-        # Sắp xếp ưu tiên: Sẵn đủ hàng trước -> Đơn giá thấp nhất
         all_offers.sort(key=lambda x: (not x["is_stock_enough"], x["price"] if x["price"] is not None else 999999))
 
-        # Chọn Top 2 NCC độc lập (NCC 1 tối ưu và NCC 2)
         unique_dists = []
         seen = set()
         for off in all_offers:
@@ -703,6 +789,7 @@ def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str,
             "Designator": designator,
             "Mã Gốc (MPN)": mpn,
             "Mô Tả Linh Kiện": description,
+            "Yêu Cầu Kỹ Thuật (Chung)": spec_baseline,
             "Nhà Sản Xuất": mfg,
             "Vòng Đời": lifecycle,
             "SL Mua": qty,
@@ -710,25 +797,21 @@ def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str,
             "Trạng Thái Cung Ứng": status,
             "Ước Tính Tổng Tiền": total_cost_str,
 
-            # Báo giá NCC 1 (Tối ưu nhất giữa DigiKey và Mouser)
             "NCC 1 (Tối ưu)": d1["distributor"] if d1 else "-",
             "Đơn Giá 1": price_display,
             "Kho NCC 1": d1["stock"] if d1 else 0,
             "Lead Time 1": d1["lead_time"] if d1 else "-",
 
-            # Báo giá NCC 2 (Để so sánh trực tiếp)
             "NCC 2": d2["distributor"] if d2 else "-",
             "Đơn Giá 2": f"{d2['price']} {d2['currency']}" if d2 and d2["price"] is not None else "-",
             "Kho NCC 2": d2["stock"] if d2 else 0,
             "Lead Time 2": d2["lead_time"] if d2 else "-",
 
-            # TÁCH RIÊNG: MÃ TƯƠNG ĐƯƠNG 2 (KHÁC NSX, CÓ SẴN HÀNG)
             "Mã Tương Đương 2": alt_2.get("mpn", "-"),
             "NSX Mã 2": alt_2.get("manufacturer", "-"),
             "Kho Mã 2": alt_2.get("stock", 0),
             "Đơn Giá Mã 2": alt_2.get("price", "-"),
 
-            # TÁCH RIÊNG: MÃ TƯƠNG ĐƯƠNG 3 (KHÁC NSX, CÓ SẴN HÀNG)
             "Mã Tương Đương 3": alt_3.get("mpn", "-"),
             "NSX Mã 3": alt_3.get("manufacturer", "-"),
             "Kho Mã 3": alt_3.get("stock", 0),
@@ -796,11 +879,18 @@ def _style_excel_sheet(ws, is_template=False):
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
+        header_name = str(col[0].value or "")
+        
         for cell in col:
             val_str = str(cell.value or '')
-            if len(val_str) > max_len:
-                max_len = len(val_str)
-        ws.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 40)
+            for line in val_str.split('\n'):
+                if len(line) > max_len:
+                    max_len = len(line)
+                    
+        if any(k in header_name for k in ["Yêu Cầu", "Mô Tả"]):
+            ws.column_dimensions[col_letter].width = min(max(max_len + 4, 25), 65) 
+        else:
+            ws.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 40)
 
 
 def generate_styled_excel(results: list) -> bytes:
