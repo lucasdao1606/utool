@@ -42,3 +42,6 @@ bcrypt>=4.1.0
 # --- Authentication & TOTP (Mới bổ sung) ---
 pyotp>=2.9.0
 qrcode>=7.4.2
+
+# --- Gerber & Archive Processing ---
+rarfile>=4.1

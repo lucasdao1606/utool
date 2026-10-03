@@ -8,7 +8,6 @@ from tools.tool_bom_checker.engine import (
 )
 
 def get_secret_safely(section: str, key: str, fallback_flat_key: str = "") -> str:
-    # [Giữ nguyên hàm này như cũ]
     try:
         if section in st.secrets and key in st.secrets[section]:
             val = str(st.secrets[section][key]).strip()
@@ -33,6 +32,10 @@ def render_bom_checker_tool():
     oem_k = get_secret_safely("oemsecrets", "api_key")
     nexar_id = get_secret_safely("nexar", "client_id")
     nexar_sec = get_secret_safely("nexar", "client_secret")
+    
+    # Nạp Google Custom Search (CSE) API Keys
+    google_api_key = get_secret_safely("google", "api_key")
+    google_cx = get_secret_safely("google", "cx")
 
     # XỬ LÝ ĐẶC BIỆT CHO MẢNG GEMINI KEYS
     gemini_keys = []
@@ -58,7 +61,9 @@ def render_bom_checker_tool():
         "oemsecrets_key": oem_k,
         "nexar_id": nexar_id,
         "nexar_secret": nexar_sec,
-        "gemini_keys": gemini_keys  # Lưu dưới dạng mảng (list)
+        "google_api_key": google_api_key,
+        "google_cx": google_cx,
+        "gemini_keys": gemini_keys
     }
 
     # 2. KHU VỰC TẢI FILE & TEMPLATE

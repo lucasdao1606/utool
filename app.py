@@ -23,6 +23,7 @@ from tools.tool_bom_checker.view import render_bom_checker_tool
 from tools.tool_pdf_to_word_ocr.view import render_pdf_to_word_tool
 from tools.tool_spec_auditor.view import render_spec_auditor_tool
 from tools.tool_gdrive_secure.view import render_gdrive_secure_tool
+from tools.tool_gerber_analyzer.view import render_gerber_analyzer_tool
 
 # Import các hàm xử lý 2FA và mật khẩu
 from core.db import (
@@ -162,6 +163,7 @@ def main():
         "🔏 Đóng dấu giáp lai PDF": render_stamp_pdf_tool,
         "🔬 Đối soát Chỉ tiêu Kỹ thuật & Datasheet": render_spec_auditor_tool,
         "🔍 Kiểm tra nguồn hàng BOM": render_bom_checker_tool,
+        "🎛️ Phân tích & Đánh giá Gerber PCB": render_gerber_analyzer_tool,
     }
     
     if current_user_email == ADMIN_EMAIL:

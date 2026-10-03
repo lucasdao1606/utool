@@ -4,9 +4,11 @@ import re
 import time
 import base64
 import random
+import urllib.parse
 import requests
 import pandas as pd
 import openpyxl
+from bs4 import BeautifulSoup
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -81,7 +83,6 @@ def _extract_parameters(product_data: dict) -> dict:
         return {}
     return {p.get("ParameterText", ""): p.get("ValueText", "") for p in params}
 
-# Danh sách model thực tế khả dụng
 _AVAILABLE_MODELS = [
     'gemini-3.8-flash',
     'gemini-3.7-flash',
@@ -91,27 +92,75 @@ _AVAILABLE_MODELS = [
     'gemini-flash-latest'
 ]
 
-def build_spec_baseline_with_gemini(api_keys: list, base_mpn: str, base_data: dict, alt1_data: dict, alt2_data: dict, debug_logs: list = None) -> str:
+def search_and_scrape_google_for_spec(api_key: str, cx: str, mpn: str, debug_logs: list = None) -> str:
+    if not api_key or not cx:
+        return ""
+    
+    query = urllib.parse.quote(f"{mpn} datasheet specifications features")
+    url = f"https://www.googleapis.com/customsearch/v1?q={query}&key={api_key}&cx={cx}"
+    
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            if debug_logs is not None:
+                debug_logs.append(f"❌ [Google Search] Lỗi {res.status_code}: {res.text[:100]}")
+            return ""
+        
+        items = res.json().get("items", [])
+        if not items:
+            return ""
+            
+        scraped_text = ""
+        for item in items[:2]:
+            link = item.get("link")
+            try:
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                page_res = requests.get(link, headers=headers, timeout=8)
+                if page_res.status_code == 200:
+                    soup = BeautifulSoup(page_res.text, 'html.parser')
+                    text = soup.get_text(separator=' ', strip=True)
+                    scraped_text += f"\nNguồn: {link}\n{text[:1500]}\n---"
+            except Exception as e:
+                if debug_logs is not None:
+                    debug_logs.append(f"⚠️ [Google Scrape] Lỗi đọc {link}: {e}")
+                
+        return scraped_text
+    except Exception as e:
+        if debug_logs is not None:
+            debug_logs.append(f"❌ [Google Search] Exception: {e}")
+        return ""
+
+def build_spec_baseline_with_gemini(api_keys: list, base_mpn: str, base_data: dict, alt1_data: dict, alt2_data: dict, scraped_context: str = "", debug_logs: list = None) -> str:
     if not api_keys:
         return "Vui lòng cấu hình Gemini API Key."
     
     prompt = f"""
     Bạn là một kỹ sư linh kiện điện tử (Component Engineer). 
     Hãy xây dựng "Bảng Yêu Cầu Kỹ Thuật (Spec Baseline)" làm tiêu chuẩn mua hàng.
-    Tiêu chuẩn phải BAO HÀM và ĐÁP ỨNG được cả 3 mã sau bằng quy tắc chặn trên/dưới (Min/Max):
+    """
+    
+    if alt1_data or alt2_data:
+        prompt += "Tiêu chuẩn phải BAO HÀM và ĐÁP ỨNG được tất cả các mã sau bằng quy tắc chặn trên/dưới (Min/Max):\n"
+        prompt += f"1. Mã gốc: {base_mpn} | Thông số: {base_data.get('parameters', base_data.get('description', '-'))}\n"
+        if alt1_data:
+            prompt += f"2. Mã thay thế 1: {alt1_data.get('mpn')} | Thông số: {alt1_data.get('parameters', alt1_data.get('description', '-'))}\n"
+        if alt2_data:
+            prompt += f"3. Mã thay thế 2: {alt2_data.get('mpn')} | Thông số: {alt2_data.get('parameters', alt2_data.get('description', '-'))}\n"
+    else:
+        prompt += f"Dựa trên thông tin của duy nhất mã gốc sau đây, hãy trích xuất các thông số kỹ thuật cốt lõi để làm tiêu chuẩn mua hàng:\n"
+        prompt += f"- Mã gốc: {base_mpn} | Thông số: {base_data.get('parameters', base_data.get('description', '-'))}\n"
 
-    1. Mã gốc: {base_mpn} | Thông số: {base_data.get('parameters', base_data.get('description'))}
-    2. Mã thay thế 1: {alt1_data.get('mpn')} | Thông số: {alt1_data.get('parameters', alt1_data.get('description'))}
-    3. Mã thay thế 2: {alt2_data.get('mpn')} | Thông số: {alt2_data.get('parameters', alt2_data.get('description'))}
-
+    if scraped_context:
+        prompt += f"\n(Lưu ý: Dữ liệu phân phối bị thiếu. Vui lòng tham khảo thêm thông tin cào được từ website sau đây để tổng hợp Spec):\n{scraped_context}\n"
+        
+    prompt += """
     YÊU CẦU ĐỊNH DẠNG NGHIÊM NGẶT:
     - Xuất trực tiếp dưới dạng danh sách gạch đầu dòng (bắt đầu bằng dấu trừ "-").
     - TUYỆT ĐỐI KHÔNG dùng ký hiệu in đậm (**).
-    - TỐI ĐA HÓA việc sử dụng các ký hiệu toán học (≥, ≤, ~ hoặc -) thay vì dùng chữ (ví dụ: dùng "≥ 120 MHz" thay vì "tối thiểu 120 MHz", dùng "1.71V - 5.5V" thay vì "từ 1.71V đến 5.5V").
+    - TỐI ĐA HÓA việc sử dụng các ký hiệu toán học (≥, ≤, ~ hoặc -) thay vì dùng chữ (ví dụ: dùng "≥ 120 MHz" thay vì "tối thiểu 120 MHz").
     - Ngắn gọn, chuyên nghiệp, không giải thích thêm. Viết bằng tiếng Việt.
     """
     
-    # Random list key để cân bằng tải
     keys_to_try = list(api_keys)
     random.shuffle(keys_to_try)
     errors_log = []
@@ -726,7 +775,21 @@ def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str,
         spec_baseline = ""
         
         gemini_keys = config.get("gemini_keys", [])
-        if gemini_keys and (alt_2 or alt_3):
+        
+        has_valid_info = bool(base_params or (description and description != "-"))
+        scraped_info = ""
+        
+        if not has_valid_info:
+            g_api = config.get("google_api_key")
+            g_cx = config.get("google_cx")
+            if g_api and g_cx:
+                if status_text:
+                    status_text.caption(f"Đang tìm kiếm thông số kỹ thuật cho {mpn} trên Google...")
+                scraped_info = search_and_scrape_google_for_spec(g_api, g_cx, mpn, debug_logs)
+                if scraped_info and debug_logs is not None:
+                    debug_logs.append(f"🌐 [Google Search] Đã lấy được dữ liệu web cho mã {mpn}.")
+
+        if gemini_keys:
             if status_text:
                 status_text.caption(f"Đang tổng hợp Bảng Yêu Cầu Kỹ Thuật cho: {mpn} bằng AI...")
             
@@ -737,6 +800,7 @@ def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str,
                 base_data=base_data_for_ai,
                 alt1_data=alt_2,
                 alt2_data=alt_3,
+                scraped_context=scraped_info,
                 debug_logs=debug_logs
             )
 
