@@ -1,0 +1,16 @@
+{
+  "name": "tool_gerber_analyzer",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "pcb-stackup": "^4.2.8"
+  }
+}

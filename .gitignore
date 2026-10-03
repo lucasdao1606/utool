@@ -10,6 +10,12 @@ venv/
 .venv/
 .env
 
+# --- Node.js & Tracespace ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
 # --- Cấu hình, API Keys & Secrets ---
 .streamlit/secrets.toml
 credentials.json

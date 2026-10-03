@@ -17,7 +17,59 @@ from PIL import Image as PILImage, ImageDraw
 
 import google.generativeai as genai
 
+# Thử import thư viện quét DFM nội bộ (pcb-tools)
+try:
+    import gerber
+    from gerber.primitives import Line
+    PCB_TOOLS_AVAILABLE = True
+except ImportError:
+    PCB_TOOLS_AVAILABLE = False
+
 PILImage.MAX_IMAGE_PIXELS = None
+
+def scan_track_width(copper_file_path, min_width_mm=0.15):
+    """Quét các đường mạch có độ rộng nhỏ hơn ngưỡng cho phép."""
+    violations = []
+    if not PCB_TOOLS_AVAILABLE:
+        return violations
+        
+    try:
+        cam_file = gerber.read(copper_file_path)
+        for primitive in cam_file.primitives:
+            if isinstance(primitive, Line):
+                width = primitive.aperture.shape[0] if isinstance(primitive.aperture.shape, tuple) else primitive.aperture.shape
+                unit_multiplier = 25.4 if cam_file.units == 'inch' else 1.0
+                width_mm = width * unit_multiplier
+                
+                if width_mm < min_width_mm:
+                    mid_x = (primitive.start[0] + primitive.end[0]) / 2
+                    mid_y = (primitive.start[1] + primitive.end[1]) / 2
+                    
+                    x_inch = mid_x if cam_file.units == 'inch' else mid_x / 25.4
+                    y_inch = mid_y if cam_file.units == 'inch' else mid_y / 25.4
+                    
+                    violations.append({
+                        "x_inch": x_inch,
+                        "y_inch": y_inch,
+                        "msg": f"Lỗi Track Width: {width_mm:.3f}mm < {min_width_mm}mm"
+                    })
+    except Exception:
+        pass
+    return violations
+
+def generate_error_gerber(violations, output_path):
+    """Tạo một file Gerber 'Ảo' chứa các điểm chấm đỏ (Lỗi DFM)."""
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write("%INCH*%\n")  # Hệ inch
+        f.write("%FSLAX25Y25*%\n") # Format 2.5 chuẩn
+        f.write("%ADD10C,0.0300*%\n") # Aperture D10: Vòng tròn 30 mil để đánh dấu lỗi
+        f.write("D10*\n") 
+        for v in violations:
+            # Chuyển đổi tọa độ inch sang số nguyên format 2.5
+            x_val = int(round(v["x_inch"] * 100000))
+            y_val = int(round(v["y_inch"] * 100000))
+            f.write(f"X{x_val}Y{y_val}D03*\n") 
+        f.write("M02*\n") # EOF
 
 def get_layer_name(filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower()
@@ -33,30 +85,23 @@ def get_layer_name(filename: str) -> str:
     }
     if ext in ext_map: return ext_map[ext]
     
-    if ext in ['.gbr', '.ger', '.art']:
-        if any(k in name_lower for k in ['smask', 'mask', 'smt', 'smb', 'stc', 'sts']):
+    if ext in ['.gbr', '.ger', '.art', '.pho']:
+        if name_no_ext in ['TOP', 'L01', 'L1', 'LAYER1', 'FRONT', 'F_CU', 'COMP', 'CMP']: return 'Top_Copper'
+        if name_no_ext in ['BOTTOM', 'BOT', 'L12', 'L16', 'LAYER12', 'BACK', 'B_CU', 'SOLD', 'SOL']: return 'Bottom_Copper'
+        if re.match(r'^L\d+', name_no_ext) or any(k in name_lower for k in ['gnd', 'pwr', 'vcc', 'in1', 'in2', 'inner']): return f"Inner_Copper_{name_no_ext}"
+        if any(k in name_lower for k in ['smask', 'mask', 'smt', 'smb', 'stc', 'sts', 'soldermask']):
             if any(k in name_lower for k in ['top', 'f_', 'smt', 'stc', 'front']): return 'Top_Solder_Mask'
             if any(k in name_lower for k in ['bot', 'b_', 'smb', 'sts', 'back']): return 'Bottom_Solder_Mask'
             return 'Solder_Mask'
-            
         if any(k in name_lower for k in ['silk', 'sst', 'ssb', 'plc', 'pls']):
             if any(k in name_lower for k in ['top', 'f_', 'sst', 'plc', 'front']): return 'Top_Silkscreen'
             if any(k in name_lower for k in ['bot', 'b_', 'ssb', 'pls', 'back']): return 'Bottom_Silkscreen'
             return 'Silkscreen'
-
         if any(k in name_lower for k in ['paste', 'spt', 'spb']):
             if any(k in name_lower for k in ['top', 'f_', 'spt', 'front']): return 'Top_Solder_Paste'
             if any(k in name_lower for k in ['bot', 'b_', 'spb', 'back']): return 'Bottom_Solder_Paste'
             return 'Solder_Paste'
-            
         if any(k in name_lower for k in ['edge', 'outline', 'board', 'mech', 'dim']): return 'Board_Outline'
-        
-        if name_no_ext in ['TOP', 'COMP', 'CMP'] or 'f_cu' in name_lower: return 'Top_Copper'
-        if name_no_ext in ['BOTTOM', 'SOLD', 'SOL'] or 'b_cu' in name_lower: return 'Bottom_Copper'
-        
-        if re.match(r'^L\d+', name_no_ext) or any(k in name_lower for k in ['gnd', 'pwr', 'vcc', 'in1', 'in2', 'inner']):
-            return f"Inner_Copper_{name_no_ext}"
-            
         return f"Other_{name_no_ext}"
     return None
 
@@ -76,13 +121,11 @@ def group_uploaded_files(uploaded_files) -> list:
 def prepare_gerber_zip(job_files, debug_logs: list = None, status_callback=None) -> bytes:
     if debug_logs is None: debug_logs = []
     if status_callback: status_callback("Đang xử lý và chuẩn bị cấu trúc gói dữ liệu...")
-    
     if len(job_files) == 1:
         file = job_files[0]
         ext = file.name.split('.')[-1].lower()
         if ext == 'zip': return file.getvalue()
         elif ext == 'rar':
-            if status_callback: status_callback("Đang bung nén tệp RAR để tái cấu trúc...")
             try:
                 import rarfile
                 if os.name == 'nt':
@@ -120,244 +163,234 @@ def render_gerber_images_and_calc(zip_data: bytes, debug_logs: list = None, stat
     if debug_logs is None: debug_logs = []
     layer_images = []
     internal_params = {"layer_count": 0, "width_mm": 0.0, "height_mm": 0.0}
-    ai_context_assets = [] # Chứa hỗn hợp cả Text (String) và Hình ảnh PDF (PIL.Image)
+    ai_context_assets = [] 
     
     if os.name == 'nt':
         current_dir = os.path.dirname(os.path.abspath(__file__))
         root_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))
         gerbv_cmd = os.path.join(root_dir, "gerbv", "bin", "gerbv.exe")
-        if not os.path.exists(gerbv_cmd): return [], internal_params, []
     else:
         gerbv_cmd = "gerbv"
         
     temp_dir = tempfile.mkdtemp()
-    copper_count = 0
-    smask_files = []
-    copper_files = []
+    node_temp_dir = tempfile.mkdtemp()
     seen_layers = set()
+    
+    tracespace_ext_map = {
+        'Top_Copper': 'gtl', 'Bottom_Copper': 'gbl',
+        'Top_Solder_Mask': 'gts', 'Bottom_Solder_Mask': 'gbs',
+        'Top_Silkscreen': 'gto', 'Bottom_Silkscreen': 'gbo',
+        'Board_Outline': 'gko'
+    }
+    has_node_files = False
     
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data), "r") as zip_ref:
             zip_ref.extractall(temp_dir)
             
-        if status_callback: status_callback("Đang phân tích vector và bóc tách dữ liệu Đa phương thức (Text/Logs/PDF)...")
+        if status_callback: status_callback("Đang phân tích vector và phân loại dữ liệu lớp mạch...")
+        
+        top_copper_file = None
+        bot_copper_file = None
+        copper_count = 0
         
         for root, _, files in os.walk(temp_dir):
             for file in files:
                 ext = os.path.splitext(file)[1].lower()
                 input_path = os.path.join(root, file)
                 
-                # --- XỬ LÝ TEXT THÔNG THƯỜNG ---
-                if ext in ['.txt', '.log', '.rpt', '.drl', '.rou', '.inf']:
+                # Bóc tách Text/PDF cho AI
+                if ext in ['.txt', '.log', '.rpt', '.inf']:
                     try:
                         with open(input_path, 'r', encoding='utf-8', errors='ignore') as f:
                             ai_context_assets.append(f"--- Nội dung file {file} ---\n{f.read()[:5000]}")
-                            debug_logs.append(f"📝 Đã thu thập text từ file: {file}")
                     except: pass
-                    
-                # --- XỬ LÝ PDF (TEXT HOẶC OCR VISION) ---
                 elif ext == '.pdf':
                     try:
-                        import fitz  # PyMuPDF
+                        import fitz 
                         doc = fitz.open(input_path)
                         extracted_text = ""
-                        # Ưu tiên lấy Text trước (Tối đa 10 trang)
-                        for i in range(min(len(doc), 10)): 
-                            extracted_text += doc[i].get_text() + "\n"
-                            
+                        for i in range(min(len(doc), 10)): extracted_text += doc[i].get_text() + "\n"
                         if len(extracted_text.strip()) > 50:
                             ai_context_assets.append(f"--- Nội dung PDF {file} ---\n{extracted_text}")
-                            debug_logs.append(f"📑 Đã bóc tách thành công text từ PDF: {file}")
                         else:
-                            # PDF không chứa Text (Ảnh Scan) -> Render hình ảnh nạp cho Gemini Vision
-                            debug_logs.append(f"👁️ Phát hiện PDF dạng ảnh Scan ({file}). Đang kích hoạt kết xuất ảnh cho AI Vision...")
-                            ai_context_assets.append(f"--- Hình ảnh Scan từ tài liệu PDF: {file} ---")
-                            
-                            # Cắt tối đa 3 trang đầu dưới dạng ảnh sắc nét (DPI 150)
                             for i in range(min(len(doc), 3)):
                                 pix = doc[i].get_pixmap(dpi=150)
-                                img_data = pix.tobytes("png")
-                                img_pil = PILImage.open(io.BytesIO(img_data))
+                                img_pil = PILImage.open(io.BytesIO(pix.tobytes("png")))
                                 ai_context_assets.append(img_pil)
-                                
-                    except ImportError:
-                        debug_logs.append(f"⚠️ Không thể đọc PDF {file}. Hệ thống thiếu thư viện PyMuPDF. Hãy chạy: pip install PyMuPDF")
-                    except Exception as e:
-                        debug_logs.append(f"⚠️ Lỗi trong quá trình xử lý PDF {file}: {e}")
+                    except: pass
 
-                # --- XỬ LÝ GERBER VECTOR ---
+                # Gửi file Drill cho Node.js Tracespace
+                if ext in ['.drl', '.xln']:
+                    shutil.copy2(input_path, os.path.join(node_temp_dir, f"drill.xln"))
+                    has_node_files = True
+
                 layer_name = get_layer_name(file)
                 if layer_name:
-                    if layer_name in seen_layers: continue
-                    seen_layers.add(layer_name)
-                    
-                    if "Copper" in layer_name:
+                    if layer_name in tracespace_ext_map:
+                        std_ext = tracespace_ext_map[layer_name]
+                        shutil.copy2(input_path, os.path.join(node_temp_dir, f"layer_{layer_name}.{std_ext}"))
+                        has_node_files = True
+                        
+                    if "Copper" in layer_name and layer_name not in seen_layers:
                         copper_count += 1
-                        copper_files.append(input_path)
-                    elif "Solder_Mask" in layer_name:
-                        smask_files.append(input_path)
                         
-                    output_png = os.path.join(temp_dir, f"{layer_name}_{random.randint(1000,9999)}.png")
-                    try:
-                        subprocess.run([gerbv_cmd, "-x", "png", "-a", "-o", output_png, "--dpi=150", "--background=#FFFFFF", "--foreground=#005500", input_path], check=True, capture_output=True)
-                        if os.path.exists(output_png):
-                            with PILImage.open(output_png) as img:
-                                if img.width > 2000 or img.height > 2000:
-                                    img.thumbnail((2000, 2000), PILImage.Resampling.LANCZOS)
-                                    img.save(output_png, format="PNG")
-                            with open(output_png, "rb") as f:
-                                layer_images.append({"name": layer_name, "filename": file, "data": f.read()})
-                    except: pass
-                        
+                    if layer_name not in seen_layers:
+                        seen_layers.add(layer_name)
+                        if layer_name == "Top_Copper": top_copper_file = input_path
+                        elif layer_name == "Bottom_Copper": bot_copper_file = input_path
+
+                        # GERBV RENDER ẢNH PNG TĨNH LÊN UI
+                        output_png = os.path.join(temp_dir, f"{layer_name}_{random.randint(1000,9999)}.png")
+                        try:
+                            if os.path.exists(gerbv_cmd) or os.name != 'nt':
+                                subprocess.run([gerbv_cmd, "-x", "png", "-a", "-o", output_png, "--dpi=150", "--background=#FFFFFF", "--foreground=#005500", input_path], check=True, capture_output=True)
+                                if os.path.exists(output_png):
+                                    with PILImage.open(output_png) as img:
+                                        if img.width > 2000 or img.height > 2000:
+                                            img.thumbnail((2000, 2000), PILImage.Resampling.LANCZOS)
+                                            img.save(output_png, format="PNG")
+                                    with open(output_png, "rb") as f:
+                                        layer_images.append({"name": layer_name, "filename": file, "data": f.read(), "type": "png"})
+                        except: pass
+
         internal_params["layer_count"] = copper_count if copper_count > 0 else 2
         
-        target_files = smask_files if smask_files else copper_files
-        if target_files:
-            try:
-                svg_path = os.path.join(temp_dir, "calc_dim.svg")
-                subprocess.run([gerbv_cmd, "-x", "svg", "-a", "-o", svg_path] + target_files, check=True, capture_output=True)
-                if os.path.exists(svg_path):
-                    with open(svg_path, 'r', encoding='utf-8') as f: svg_str = f.read()
-                    match_w = re.search(r'width="([\d.]+)([a-zA-Z]*)"', svg_str)
-                    match_h = re.search(r'height="([\d.]+)([a-zA-Z]*)"', svg_str)
-                    if match_w and match_h:
-                        def to_mm(val, unit):
-                            if unit == 'in': return val * 25.4
-                            if unit == 'pt': return val * 25.4 / 72.0
-                            if unit == 'cm': return val * 10.0
-                            if unit == 'px' or not unit: return val * 25.4 / 96.0
-                            return val
-                        internal_params["width_mm"] = round(to_mm(float(match_w.group(1)), match_w.group(2).lower()), 2)
-                        internal_params["height_mm"] = round(to_mm(float(match_h.group(1)), match_h.group(2).lower()), 2)
-                        debug_logs.append(f"✅ gerbv đo đạc vector xong: X={internal_params['width_mm']}mm, Y={internal_params['height_mm']}mm")
-            except: pass
+        # =================================================================
+        # 1. GỌI NODE.JS (TRACESPACE) RENDER ẢNH PHOTOREALISTIC
+        # =================================================================
+        if has_node_files:
+            if status_callback: status_callback("Đang kích hoạt Node.js kết xuất ảnh bo mạch chân thực (Photorealistic)...")
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            root_dir = os.path.abspath(os.path.join(current_dir, "..", "..")) 
+            node_script = os.path.join(current_dir, "tracespace_render.js")
+            if not os.path.exists(node_script):
+                node_script = os.path.join(root_dir, "tracespace_render.js")
+                
+            if os.path.exists(node_script):
+                try:
+                    node_cmd = ["node", node_script, node_temp_dir]
+                    result = subprocess.run(node_cmd, capture_output=True, text=True)
+                    json_match = re.search(r'\{.*\}', result.stdout, re.DOTALL)
+                    
+                    if json_match:
+                        board_data = json.loads(json_match.group(0))
+                        if board_data.get("status") == "success":
+                            for side_key, side_name in [('top_svg', 'Bo mạch Siêu thực (Mặt Top)'), ('bottom_svg', 'Bo mạch Siêu thực (Mặt Bot)')]:
+                                svg_path = board_data.get(side_key)
+                                if svg_path and os.path.exists(svg_path):
+                                    with open(svg_path, 'r', encoding='utf-8') as f:
+                                        layer_images.append({
+                                            "name": side_name, 
+                                            "filename": "tracespace_render.svg", 
+                                            "data": f.read().encode('utf-8'),
+                                            "type": "svg"
+                                        })
+                            debug_logs.append("✅ Kết xuất ảnh SVG Photorealistic bằng Tracespace thành công!")
+                except Exception as e:
+                    debug_logs.append(f"❌ Lỗi chạy Node.js Render: {e}")
+
+        # =================================================================
+        # 2. DFM HEATMAP: GERBV RENDER LAYER ĐỒNG VÀ LAYER LỖI ẢO TÁCH BIỆT
+        # =================================================================
+        if top_copper_file or bot_copper_file:
+            if status_callback: status_callback("Đang phân tích rủi ro DFM Track Width và kết xuất Vector...")
+            
+            def process_dfm_side(copper_file, side_name, side_key):
+                if not copper_file: return
+                violations = scan_track_width(copper_file)
+                error_gbr_path = os.path.join(temp_dir, f"{side_key}_errors.gbr")
+                dfm_svg_path = os.path.join(temp_dir, f"{side_key}_dfm.svg")
+                
+                if violations:
+                    generate_error_gerber(violations, error_gbr_path)
+                    debug_logs.append(f"⚠️ Đã tạo layer Gerber Ảo chứa {len(violations)} chấm báo lỗi cho {side_name}.")
+                    try:
+                        if os.path.exists(gerbv_cmd) or os.name != 'nt':
+                            cmd = [gerbv_cmd, "-b", "#FFFFFF", "-f", "#005500", copper_file, "-f", "#FF0000", error_gbr_path, "-x", "svg", "-a", "-o", dfm_svg_path]
+                            subprocess.run(cmd, check=True, capture_output=True)
+                    except Exception as e:
+                        debug_logs.append(f"❌ Lỗi chạy gerbv SVG DFM {side_key}: {e}")
+                else:
+                    try:
+                        if os.path.exists(gerbv_cmd) or os.name != 'nt':
+                            cmd = [gerbv_cmd, "-b", "#FFFFFF", "-f", "#005500", copper_file, "-x", "svg", "-a", "-o", dfm_svg_path]
+                            subprocess.run(cmd, check=True, capture_output=True)
+                    except: pass
+
+                if os.path.exists(dfm_svg_path):
+                    with open(dfm_svg_path, 'r', encoding='utf-8') as f:
+                        layer_images.append({
+                            "name": f"Bản đồ Lỗi Kỹ thuật ({side_name})",
+                            "filename": f"{side_key}_dfm_heatmap.svg",
+                            "data": f.read().encode('utf-8'),
+                            "type": "svg"
+                        })
+            
+            process_dfm_side(top_copper_file, "Mặt Top", "top")
+            process_dfm_side(bot_copper_file, "Mặt Bottom", "bot")
+            debug_logs.append("✅ Kết xuất Bản đồ Vector DFM Tách mặt (Top/Bot) bằng gerbv hoàn tất!")
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(node_temp_dir, ignore_errors=True)
         
-    layer_images.sort(key=lambda x: ("Top" not in x["name"], "Bottom" not in x["name"], x["name"]))
     return layer_images, internal_params, ai_context_assets
 
 def analyze_with_gemini_ai(ai_context_assets: list, internal_params: dict, mf_params: dict, gemini_api_keys: list, debug_logs: list, status_callback=None) -> dict:
-    if not gemini_api_keys:
-        debug_logs.append("⚠️ Không có cấu hình GEMINI_API_KEYS. Bỏ qua luồng phân tích AI.")
-        return None
-    
-    if status_callback: status_callback("🧠 Kích hoạt Gemini AI: Đang phân tích Chuyên sâu (Vision & Text) tài liệu sản xuất...")
-    
+    if not gemini_api_keys: return None
+    if status_callback: status_callback("🧠 Kích hoạt Gemini AI: Đang phân tích Chuyên sâu...")
     keys_to_try = list(gemini_api_keys)
     random.shuffle(keys_to_try)
     
-    instruction_text = f"""
-    Bạn là một kỹ sư chuyên gia về CAM (Computer-Aided Manufacturing) và DFM cho bo mạch PCB.
-    Tôi đang xử lý một dự án PCB và thu thập được các số liệu từ máy móc như sau:
-    
-    1. Số liệu do công cụ vector nội bộ đo được:
-    - Số lớp đồng đếm được: {internal_params.get('layer_count')}
-    - Kích thước đo đạc: {internal_params.get('width_mm')} mm x {internal_params.get('height_mm')} mm
-    
-    2. Số liệu từ API máy chủ sản xuất MacroFab trả về:
-    {json.dumps(mf_params, ensure_ascii=False) if mf_params else "API không trả về thông tin hợp lệ."}
-    
-    Dưới đây là NỘI DUNG VĂN BẢN VÀ HÌNH ẢNH TRÍCH XUẤT TỪ CÁC TÀI LIỆU LOG, PDF KÈM THEO:
-    """
+    instruction_text = f"""Bạn là chuyên gia CAM và DFM PCB. Số liệu phần mềm quét: {internal_params.get('layer_count')} lớp. 
+    Số liệu MacroFab API: {json.dumps(mf_params, ensure_ascii=False) if mf_params else 'N/A'}.
+    Dưới đây là DỮ LIỆU TÀI LIỆU SẢN XUẤT THU THẬP:"""
 
-    task_text = """
-    NHIỆM VỤ CỦA BẠN:
-    Phân tích nội dung tài liệu (cả chữ và ảnh) kết hợp với số đo của máy móc để đưa ra kết luận THỰC TẾ VÀ CHÍNH XÁC NHẤT về bo mạch. 
-    Nếu các file Log hoặc bản PDF ghi rõ thông số, hãy ưu tiên các tài liệu này.
+    task_text = """TRẢ VỀ DUY NHẤT 1 CHUỖI JSON:
+    {"layer_count": "chuỗi", "dimensions_mm": "chuỗi", "board_thickness": "chuỗi", "material": "chuỗi", "surface_finish": "chuỗi", "copper_weight": "chuỗi", "smt_technology": "chuỗi", "total_holes": "số", "plated_holes": "số", "non_plated_holes": "số", "ipc_errors": "số", "ipc_warnings": "số", "ai_reasoning": "chuỗi"}"""
     
-    BẠN BẮT BUỘC CHỈ TRẢ VỀ DUY NHẤT 1 CHUỖI JSON THEO CẤU TRÚC SAU:
-    {
-        "layer_count": "số nguyên hoặc chuỗi ghi rõ khác biệt",
-        "dimensions_mm": "chuỗi, ví dụ: 120.5 x 85.2 mm",
-        "board_thickness": "chuỗi, ví dụ: 1.6 mm",
-        "material": "chuỗi vật liệu, ví dụ: FR-4",
-        "surface_finish": "chuỗi bề mặt, ví dụ: ENIG hoặc HASL",
-        "copper_weight": "chuỗi độ dày đồng, vd: 1 oz",
-        "smt_technology": "chuỗi, SMT hoặc THT",
-        "total_holes": "số nguyên",
-        "plated_holes": "số nguyên",
-        "non_plated_holes": "số nguyên",
-        "ipc_errors": "số nguyên",
-        "ipc_warnings": "số nguyên",
-        "ai_reasoning": "Một câu giải thích ngắn gọn bằng tiếng Việt về cơ sở chốt số liệu."
-    }
-    """
-    
-    # Hợp nhất Dữ liệu Đa phương thức (Text String + Hình ảnh PIL)
     prompt = [instruction_text]
     prompt.extend(ai_context_assets)
     prompt.append(task_text)
     
     for attempt, key in enumerate(keys_to_try):
         try:
-            debug_logs.append(f"\n🔄 [KEY {attempt+1}/{len(keys_to_try)}] Đang mở kết nối Gemini AI...")
             genai.configure(api_key=key)
-            
             available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods and 'gemini' in m.name.lower()]
-            if not available_models:
-                debug_logs.append(f"⚠️ Key {attempt+1} hợp lệ nhưng không được cấp quyền chạy Model nào.")
-                continue
+            if not available_models: continue
 
             def model_sort_key(m_name):
                 nums = re.findall(r'\d+\.\d+', m_name)
                 version = float(nums[0]) if nums else 0.0
-                
-                stability = 3
-                if 'preview' in m_name.lower() or 'exp' in m_name.lower(): stability = 1
-                elif 'latest' in m_name.lower(): stability = 2
-                
+                stability = 2 if 'latest' in m_name.lower() else (1 if 'preview' in m_name.lower() or 'exp' in m_name.lower() else 3)
                 tier = 2 if 'flash' in m_name.lower() else 1
-                
                 return (version, stability, tier, m_name)
 
             available_models.sort(key=model_sort_key, reverse=True)
             top_5_models = available_models[:5]
             
-            debug_logs.append(f"🔍 Top 5 Model được xếp hạng: {', '.join([m.replace('models/', '') for m in top_5_models])}")
-            
             for model_idx, selected_model in enumerate(top_5_models):
-                debug_logs.append(f"⚡ Đang nạp Model [{model_idx+1}/5]: {selected_model}")
                 try:
                     generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
                     model = genai.GenerativeModel(model_name=selected_model, generation_config=generation_config)
-                    
-                    max_retries = 3
-                    for retry in range(max_retries):
+                    for retry in range(3):
                         try:
-                            if status_callback: status_callback(f"AI đang phân tích DFM chuyên sâu bằng {selected_model.replace('models/', '')} (Thử lần {retry+1})...")
-                            
                             response = model.generate_content(prompt)
                             raw_text = response.text.replace('```json', '').replace('```', '').strip()
                             parsed_json = json.loads(raw_text)
-                            
-                            debug_logs.append(f"✅ AI phân tích thành công! Lời phê: {parsed_json.get('ai_reasoning')}")
+                            debug_logs.append(f"✅ AI phân tích thành công!")
                             return parsed_json
-                            
                         except Exception as inner_e:
                             error_str = str(inner_e).lower()
-                            if "429" in error_str or "quota" in error_str or "exhausted" in error_str or "404" in error_str:
-                                debug_logs.append(f"⚠️ Model {selected_model} bị giới hạn Quota hoặc không cấp quyền. Chuyển Model khác...")
-                                break 
-                                
-                            debug_logs.append(f"⚠️ Lỗi mạng tạm thời: {inner_e}")
-                            if retry < max_retries - 1: time.sleep(3)
-                            else: debug_logs.append(f"❌ Bỏ qua Model {selected_model} do đứt kết nối.")
-                except Exception as me:
-                    debug_logs.append(f"⚠️ Lỗi nạp Model {selected_model}: {me}")
-                    
-            debug_logs.append(f"❌ Toàn bộ 5 Model siêu việt nhất trên Key {attempt+1} đều từ chối yêu cầu do cạn Quota. Chuyển API Key...")
-            
-        except Exception as e:
-            debug_logs.append(f"⚠️ Lỗi cấu hình tại Key thứ {attempt+1}: {e}")
-            
-    debug_logs.append("🚨 TẤT CẢ API KEYS ĐỀU ĐÃ SỤP ĐỔ (Cạn Quota). Hệ thống sẽ dùng số liệu tính toán nội bộ.")
+                            if "429" in error_str or "quota" in error_str or "exhausted" in error_str or "404" in error_str: break 
+                            if retry < 2: time.sleep(3)
+                except: pass
+        except: pass
     return None
 
 def upload_and_analyze_gerber(mf_api_key: str, gemini_api_keys: list, pcb_name: str, zip_data: bytes, debug_logs: list = None, status_callback=None):
     if debug_logs is None: debug_logs = []
-    
     layer_images, internal_params, ai_context_assets = render_gerber_images_and_calc(zip_data, debug_logs, status_callback)
 
     mf_params = {}
@@ -414,19 +447,15 @@ def upload_and_analyze_gerber(mf_api_key: str, gemini_api_keys: list, pcb_name: 
     else:
         int_layers = internal_params.get("layer_count", 0)
         mf_layers = mf_params.get("layer_count", 0)
-        int_w = internal_params.get("width_mm", 0)
-        int_h = internal_params.get("height_mm", 0)
         mf_w = mf_params.get("width_mm", 0)
         mf_h = mf_params.get("height_mm", 0)
 
         merged_layers = f"{mf_layers} (API) / {int_layers} (Nội bộ)" if (mf_layers > 0 and int_layers > 0 and mf_layers != int_layers) else (mf_layers if mf_layers > 0 else int_layers)
-        merged_w = f"{mf_w} (API) / {int_w} (Nội bộ)" if (mf_w > 0 and int_w > 0 and abs(mf_w - int_w) > 2.0) else (mf_w if mf_w > 0 else (int_w if int_w > 0 else "N/A"))
-        merged_h = f"{mf_h} (API) / {int_h} (Nội bộ)" if (mf_h > 0 and int_h > 0 and abs(mf_h - int_h) > 2.0) else (mf_h if mf_h > 0 else (int_h if int_h > 0 else "N/A"))
         
         final_params = {
             "Số lớp Đồng (Layer Count)": merged_layers,
-            "Kích thước X (Width - mm)": merged_w,
-            "Kích thước Y (Height - mm)": merged_h,
+            "Kích thước X (Width - mm)": mf_w if mf_w > 0 else "N/A",
+            "Kích thước Y (Height - mm)": mf_h if mf_h > 0 else "N/A",
             "Độ dày mạch (Board Thickness)": mf_params.get("thickness", "1.6 mm"),
             "Công nghệ hàn (Assembly)": mf_params.get("smt", "Chưa xác định")
         }
@@ -498,19 +527,21 @@ def generate_pcb_report_excel(results: list) -> bytes:
         for res in results:
             pcb_name = res.get("pcb_name", "Unknown")
             safe_sheet_name = re.sub(r'[\\/*?:\[\]]', '_', pcb_name)[:30]
-            if safe_sheet_name in wb.sheetnames:
-                safe_sheet_name = f"{safe_sheet_name[:26]}_{random.randint(100, 999)}"
+            if safe_sheet_name in wb.sheetnames: safe_sheet_name = f"{safe_sheet_name[:26]}_{random.randint(100, 999)}"
                 
             ws_img = wb.create_sheet(title=safe_sheet_name)
             ws_img.column_dimensions['A'].width = 80
             
             layer_images = res.get("layer_images", [])
             current_row = 1
-            if not layer_images:
-                ws_img.cell(row=1, column=1, value="Không tìm thấy ảnh kết xuất cho bo mạch này.")
-                continue
+            if not layer_images: continue
                 
             for img_info in layer_images:
+                if img_info.get("type") == "svg":
+                    ws_img.cell(row=current_row, column=1, value=f"[Bản vẽ Vector phân giải cao - Có thể tải về từ Web]")
+                    current_row += 2
+                    continue
+                    
                 layer_name = img_info["name"]
                 orig_file = img_info["filename"]
                 img_data = img_info["data"]
