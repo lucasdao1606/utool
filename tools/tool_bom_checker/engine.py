@@ -18,15 +18,16 @@ from google import genai
 # 1. TẠO FILE BOM TEMPLATE CHUẨN MẪU
 # ==========================================
 def generate_sample_bom_template() -> bytes:
+    # Tối giản template chỉ giữ lại 2 cột thiết yếu
     data = [
-        {"STT": 1, "Designator": "U1", "MPN": "STM32F407VGT6", "Quantity": 500, "Manufacturer": "STMicroelectronics", "Description": "MCU 32-bit ARM Cortex-M4 1MB Flash LQFP-100", "Footprint": "LQFP-100"},
-        {"STT": 2, "Designator": "U2", "MPN": "ESP32-WROOM-32E", "Quantity": 1000, "Manufacturer": "Espressif Systems", "Description": "Module Wi-Fi + BLE 4MB Flash SMD", "Footprint": "MODULE-SMD"},
-        {"STT": 3, "Designator": "U3", "MPN": "ATMEGA328P-AU", "Quantity": 200, "Manufacturer": "Microchip", "Description": "MCU 8-bit AVR 32KB Flash TQFP-32", "Footprint": "TQFP-32"},
-        {"STT": 4, "Designator": "U4", "MPN": "AMS1117-3.3", "Quantity": 2000, "Manufacturer": "Advanced Monolithic", "Description": "IC LDO Reg 3.3V 1A SOT-223", "Footprint": "SOT-223"},
-        {"STT": 5, "Designator": "U5", "MPN": "CH340G", "Quantity": 500, "Manufacturer": "WCH", "Description": "USB to Serial Bridge Controller SOP-16", "Footprint": "SOP-16"},
-        {"STT": 6, "Designator": "U6", "MPN": "LM358DR", "Quantity": 800, "Manufacturer": "Texas Instruments", "Description": "Dual Op-Amp 1MHz SOIC-8", "Footprint": "SOIC-8"},
-        {"STT": 7, "Designator": "R1, R2", "MPN": "0603WAF1002T5E", "Quantity": 5000, "Manufacturer": "UniOhm", "Description": "SMD Resistor 10k Ohm 1% 1/10W 0603", "Footprint": "0603"},
-        {"STT": 8, "Designator": "C1, C2", "MPN": "CL10A106KP8NNNC", "Quantity": 5000, "Manufacturer": "Samsung Electro-Mechanics", "Description": "SMD Capacitor 10uF 10V X5R 0603", "Footprint": "0603"}
+        {"MPN": "STM32F407VGT6", "Quantity": 500},
+        {"MPN": "ESP32-WROOM-32E", "Quantity": 1000},
+        {"MPN": "ATMEGA328P-AU", "Quantity": 200},
+        {"MPN": "AMS1117-3.3", "Quantity": 2000},
+        {"MPN": "CH340G", "Quantity": 500},
+        {"MPN": "LM358DR", "Quantity": 800},
+        {"MPN": "0603WAF1002T5E", "Quantity": 5000},
+        {"MPN": "CL10A106KP8NNNC", "Quantity": 5000}
     ]
     df = pd.DataFrame(data)
     output = io.BytesIO()
@@ -710,7 +711,7 @@ def fetch_cross_references(keyword: str, exclude_mpn: str, exclude_mfg: str, tar
     return alternates
 
 
-def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str, config: dict, progress_bar=None, status_text=None, debug_logs: list = None) -> list:
+def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str, config: dict, progress_bar=None, status_text=None, debug_logs: list = None, partial_callback=None) -> list:
     results = []
     total = len(df)
 
@@ -883,6 +884,10 @@ def process_bom_data(df: pd.DataFrame, mpn_col: str, qty_col: str, des_col: str,
 
             "Datasheet": datasheet
         })
+
+        # Lưu dữ liệu phân đoạn vào phiên làm việc
+        if partial_callback:
+            partial_callback(results)
 
         processed = idx + 1
         if progress_bar:

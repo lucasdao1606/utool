@@ -70,6 +70,8 @@ def render_bom_checker_tool():
     c_left, c_right = st.columns([3, 1.2])
     with c_left:
         st.markdown("**1. Tải lên file BOM cần kiểm tra:**")
+        # Thêm ghi chú hướng dẫn cho người dùng
+        st.info("💡 **Ghi chú:** File tải lên chỉ cần khớp 2 cột **Mã MPN** và **Số lượng**. Vị trí cột bất kỳ, các cột dữ liệu thừa khác hệ thống sẽ tự động bỏ qua.")
     with c_right:
         template_bytes = generate_sample_bom_template()
         st.download_button(
@@ -98,16 +100,27 @@ def render_bom_checker_tool():
         columns = list(df_input.columns)
         default_mpn = next((i for i, c in enumerate(columns) if any(k in c.lower() for k in ["mpn", "mã", "part"])), 0)
         default_qty = next((i for i, c in enumerate(columns) if any(k in c.lower() for k in ["qty", "sl", "lượng", "quantity"])), min(1, len(columns)-1))
-        default_des = next((i for i, c in enumerate(columns) if any(k in c.lower() for k in ["designator", "vị trí", "ref"])), None)
 
-        col_mpn, col_qty, col_des, col_btn = st.columns([2, 1.5, 1.5, 2])
+        # Thu gọn bảng lựa chọn trường thông tin chỉ còn MPN và Quantity
+        col_mpn, col_qty = st.columns(2)
         mpn_col = col_mpn.selectbox("Cột Mã MPN:", options=columns, index=default_mpn)
         qty_col = col_qty.selectbox("Cột Số Lượng:", options=columns, index=default_qty)
-        des_col = col_des.selectbox("Cột Vị trí (Designator):", options=["Không có"] + columns, index=(default_des + 1) if default_des is not None else 0)
+        
+        # Ẩn Designator, tự động fallback
+        des_key = None
 
-        des_key = None if des_col == "Không có" else des_col
+        # Sắp xếp nút Bắt đầu và Dừng lại
+        col_btn_start, col_btn_stop = st.columns(2)
+        start_clicked = col_btn_start.button("🚀 Bắt đầu thẩm định BOM", type="primary", use_container_width=True)
+        stop_clicked = col_btn_stop.button("🛑 Dừng lại & Lấy kết quả hiện tại", type="secondary", use_container_width=True)
 
-        if col_btn.button("🚀 Bắt đầu thẩm định BOM", type="primary", use_container_width=True):
+        if stop_clicked:
+            if st.session_state.get("bom_check_results"):
+                st.info(f"Đã ngắt hệ thống. Xuất thành công dữ liệu của {len(st.session_state['bom_check_results'])} linh kiện.")
+            else:
+                st.warning("Quá trình đã dừng. Chưa có mã linh kiện nào được xử lý hoàn thiện.")
+
+        if start_clicked:
             if not config.get("mouser_key") and not config.get("digikey_id"):
                 st.error("❌ Không tìm thấy API Key nào trong file `.streamlit/secrets.toml`. Vui lòng kiểm tra lại file cấu hình.")
                 return
@@ -117,9 +130,16 @@ def render_bom_checker_tool():
             prog_bar = st.progress(0.0)
             status_txt = st.empty()
             debug_logs = []
+            
+            # Xóa lịch sử phiên cũ
+            st.session_state["bom_check_results"] = []
+            st.session_state["bom_debug_logs"] = []
 
             if config.get("gemini_keys"):
                 debug_logs.append(f"🤖 Đã nạp thành công {len(config['gemini_keys'])} Gemini API Keys để cân bằng tải.")
+
+            def save_partial_results(current_results):
+                st.session_state["bom_check_results"] = current_results
 
             try:
                 with st.spinner("Đang kết nối kho dữ liệu toàn cầu & phân tích linh kiện tương đương..."):
@@ -131,24 +151,40 @@ def render_bom_checker_tool():
                         config=config,
                         progress_bar=prog_bar,
                         status_text=status_txt,
-                        debug_logs=debug_logs
+                        debug_logs=debug_logs,
+                        partial_callback=save_partial_results
                     )
                 prog_bar.empty()
                 status_txt.success(f"✅ Đã thẩm định xong {len(results)} linh kiện!")
-                st.session_state["bom_check_results"] = results
             except Exception as ex:
+                # Xử lý các lỗi gián đoạn từ hệ thống
                 prog_bar.empty()
                 status_txt.error(f"❌ Xảy ra lỗi trong quá trình thực thi: {ex}")
             finally:
                 st.session_state["bom_debug_logs"] = debug_logs
 
-    # 3. HIỂN THỊ BÁO CÁO & EXPORT
+    # 3. HIỂN THỊ BÁO CÁO & EXPORT (Dữ liệu gọi từ session state, sẽ kích hoạt khi dừng)
     if "bom_check_results" in st.session_state and st.session_state["bom_check_results"]:
         results = st.session_state["bom_check_results"]
         df_result = pd.DataFrame(results)
 
         st.divider()
-        st.markdown("### 📊 Kết Quả Thẩm Định BOM Linh Kiện")
+        
+        # ĐƯA NÚT EXPORT LÊN NGANG HÀNG VỚI TIÊU ĐỀ ĐỂ LUÔN LUÔN NHÌN THẤY
+        col_title, col_export = st.columns([3, 1])
+        with col_title:
+            st.markdown("### 📊 Kết Quả Thẩm Định BOM Linh Kiện")
+        
+        with col_export:
+            excel_bytes = generate_styled_excel(results)
+            st.download_button(
+                label="📥 Tải Xuống Báo Cáo BOM Master",
+                data=excel_bytes,
+                file_name=f"BOM_Master_Report_{uploaded_file.name if uploaded_file else 'data'}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True
+            )
 
         kpi_total = len(df_result)
         kpi_ready = len(df_result[df_result["Trạng Thái Cung Ứng"].str.contains("Sẵn hàng")])
@@ -161,17 +197,8 @@ def render_bom_checker_tool():
         c3.metric("🟡 Thiếu hàng một phần", kpi_partial)
         c4.metric("🔴 Hết hàng", kpi_out)
 
-        st.dataframe(df_result, use_container_width=True, height=480)
-
-        excel_bytes = generate_styled_excel(results)
-        st.download_button(
-            label="📥 Tải Xuống Báo Cáo BOM Master",
-            data=excel_bytes,
-            file_name=f"BOM_Master_Report_{uploaded_file.name if uploaded_file else 'data'}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True
-        )
+        # Căn chỉnh lại chiều cao hiển thị bảng dữ liệu
+        st.dataframe(df_result, use_container_width=True, height=400)
 
     if "bom_debug_logs" in st.session_state and st.session_state["bom_debug_logs"]:
         has_issue = ("bom_check_results" in st.session_state and kpi_ready == 0 and kpi_partial == 0)
